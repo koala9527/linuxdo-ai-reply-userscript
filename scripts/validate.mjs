@@ -35,6 +35,7 @@ const requiredSnippets = [
   'function watchTopicNavigation(onChange)',
   'function getTopicIdFromPath(pathname)',
   'topic:${topicId}',
+  'if (!topicKey) return;',
   'function requestChatCompletion(config, topic)',
   '/chat/completions',
   '===AI_REPLY_',
