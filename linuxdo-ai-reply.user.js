@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI Reply Assistant
 // @namespace    https://git.tuwei.space/koala9527/linuxdo-ai-reply-userscript
-// @version      0.3.0
+// @version      0.3.1
 // @description  Read linux.do topic content and generate a reply with an OpenAI-compatible API.
 // @author       Hermes Agent
 // @match        https://linux.do/t/*
@@ -937,8 +937,17 @@
     node.style.color = isError ? '#dc2626' : '#475569';
   }
 
+  function getTopicIdFromPath(pathname) {
+    const segments = String(pathname || '').split('/').filter(Boolean);
+    if (segments[0] !== 't') return '';
+
+    const numericSegments = segments.filter((segment) => /^\d+$/.test(segment));
+    return numericSegments.length ? numericSegments[0] : '';
+  }
+
   function getAutoGenerateTopicKey() {
-    return `${location.pathname}${location.search}`;
+    const topicId = getTopicIdFromPath(location.pathname);
+    return topicId ? `topic:${topicId}` : location.pathname;
   }
 
   function setLauncherState(label) {

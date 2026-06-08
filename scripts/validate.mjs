@@ -33,6 +33,8 @@ const requiredSnippets = [
   'function attachPanelResizeHandle(panel)',
   'function maybeAutoGenerate()',
   'function watchTopicNavigation(onChange)',
+  'function getTopicIdFromPath(pathname)',
+  'topic:${topicId}',
   'function requestChatCompletion(config, topic)',
   '/chat/completions',
   '===AI_REPLY_',
