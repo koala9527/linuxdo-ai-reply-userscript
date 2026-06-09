@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Linux.do AI Reply Assistant
+// @name         Linux.do AI 回帖助手
 // @namespace    https://git.tuwei.space/koala9527/linuxdo-ai-reply-userscript
 // @version      0.3.2
 // @description  Read linux.do topic content and generate a reply with an OpenAI-compatible API.
@@ -993,7 +993,7 @@
         replies.length < config.replyCount ? '模型返回数量不足，可重新生成一次。' : '',
       ].join('\n'));
     } catch (error) {
-      console.error('[Linux.do AI Reply Assistant]', error);
+      console.error('[Linux.do AI 回帖助手]', error);
       setStatus(error?.message || String(error), true);
       setLauncherState('AI 回帖');
     } finally {

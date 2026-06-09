@@ -5,7 +5,7 @@ const source = fs.readFileSync(scriptPath, 'utf8');
 
 const requiredHeaders = [
   '// ==UserScript==',
-  '// @name         Linux.do AI Reply Assistant',
+  '// @name         Linux.do AI 回帖助手',
   '// @match        https://linux.do/t/*',
   '// @grant        GM_xmlhttpRequest',
   '// @connect      *',

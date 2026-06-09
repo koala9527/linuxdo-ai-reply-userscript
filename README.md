@@ -1,4 +1,4 @@
-# Linux.do AI Reply Userscript
+# Linux.do AI 回帖助手
 
 一个用于 linux.do 帖子页面的油猴/Tampermonkey 脚本：读取当前帖子的主体内容，按你配置的 AI `Base URL`、`API Key`、模型和提示词生成候选回复，并一键复制到剪贴板。
 
