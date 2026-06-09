@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Linux.do AI 回帖助手
 // @namespace    https://git.tuwei.space/koala9527/linuxdo-ai-reply-userscript
-// @version      0.3.3
+// @version      0.3.4
 // @description  Read linux.do topic content and generate a reply with an OpenAI-compatible API.
 // @author       Hermes Agent
 // @match        https://linux.do/t/*
 // @match        https://www.linux.do/t/*
+// @updateURL    https://raw.githubusercontent.com/koala9527/linuxdo-ai-reply-userscript/main/linuxdo-ai-reply.user.js
+// @downloadURL  https://raw.githubusercontent.com/koala9527/linuxdo-ai-reply-userscript/main/linuxdo-ai-reply.user.js
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -471,8 +473,10 @@
   function switchPromptTemplate(id) {
     syncPromptDraftFromPanel();
     if (!state.promptTemplates.some((template) => template.id === id)) return;
+    if (state.activePromptTemplateId === id) return false;
     persistActivePromptTemplateId(id);
     renderPromptEditor();
+    return true;
   }
 
   function addCustomPromptTemplate() {
@@ -966,6 +970,7 @@
   async function generateReply(options = {}) {
     if (state.busy) return;
     const isAuto = Boolean(options.auto);
+    const isPromptSwitch = options.reason === 'prompt-switch';
     const config = readPanelConfig();
     const templateError = validatePromptTemplates(config.promptTemplates);
     if (templateError) {
@@ -977,11 +982,18 @@
       setStatus('请先填写 Base URL、API Key 和 Model。', true);
       return;
     }
+    if ((isAuto || isPromptSwitch) && !getAutoGenerateTopicKey()) {
+      setStatus('当前不是帖子页，不会自动请求 AI。', true);
+      return;
+    }
     saveConfig(config);
 
     state.busy = true;
     setLauncherState(isAuto ? 'AI 回帖 · 生成中' : 'AI 回帖');
-    setStatus(`${isAuto ? '已识别到新帖子，正在自动生成候选回复……' : '正在读取帖子内容并请求 AI 生成……'}\n${getRequestUrlHint(config.baseUrl)}`);
+    const statusPrefix = isPromptSwitch
+      ? '已切换提示词，正在重新生成候选回复……'
+      : (isAuto ? '已识别到新帖子，正在自动生成候选回复……' : '正在读取帖子内容并请求 AI 生成……');
+    setStatus(`${statusPrefix}\n${getRequestUrlHint(config.baseUrl)}`);
     try {
       const topic = collectTopicContent();
       const rawReply = await requestChatCompletion(config, topic);
@@ -993,11 +1005,11 @@
       state.lastReply = formattedReply;
       state.lastReplies = replies.slice();
       renderReplyCards(replies);
-      const copied = isAuto ? false : await copyToClipboard(formattedReply);
+      const copied = (isAuto || isPromptSwitch) ? false : await copyToClipboard(formattedReply);
       setLauncherState('AI 回帖 · 已生成');
       setStatus([
         `生成完成，已提取 ${replies.length}/${config.replyCount} 条候选回复。`,
-        isAuto ? '自动生成不会改写剪贴板，需要时复制单条或复制全部。' : (copied ? '已复制全部候选回复到剪贴板。' : '剪贴板复制失败，可手动复制结果。'),
+        (isAuto || isPromptSwitch) ? '自动生成不会改写剪贴板，需要时复制单条或复制全部。' : (copied ? '已复制全部候选回复到剪贴板。' : '剪贴板复制失败，可手动复制结果。'),
         replies.length < config.replyCount ? '模型返回数量不足，可重新生成一次。' : '',
       ].join('\n'));
     } catch (error) {
@@ -1091,7 +1103,11 @@
     });
     $(`#${APP_ID}-prompt-tabs`).addEventListener('click', (event) => {
       const tab = event.target.closest('button[data-template-id]');
-      if (tab) switchPromptTemplate(tab.dataset.templateId);
+      if (!tab) return;
+      const switched = switchPromptTemplate(tab.dataset.templateId);
+      if (!switched) return;
+      saveConfig(readPanelConfig());
+      generateReply({ auto: true, reason: 'prompt-switch' });
     });
     $(`#${APP_ID}-prompt-title`).addEventListener('input', () => {
       syncPromptDraftFromPanel();

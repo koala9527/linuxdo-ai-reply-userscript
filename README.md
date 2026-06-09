@@ -22,6 +22,7 @@
 - 多条候选回复会分开展示，每条都可以单独复制，也可以一键复制全部。
 - 支持复制生成结果，不会自动打开或填入 Linux.do 回复窗口。
 - 可开启“进入帖子自动生成”，识别到新帖子后提前生成候选回复；自动生成不会改写剪贴板，需要时复制单条或复制全部。
+- 切换提示词模板后会自动用新模板重新生成候选回复，方便快速比较不同风格；该自动生成同样不会改写剪贴板。
 - 支持 5 组提示词模板：前 3 组为可修改、可重置、不可删除的预设；后 2 组为可新增、可修改、可删除的自定义模板。
 - Base URL 和 API Key 默认隐藏，可手动显示/隐藏；状态日志会对中转站地址和 Key 做脱敏。
 - 面板默认更高，并支持拖拽右下角手柄拉宽拉长，方便截图和查看长提示词。
@@ -29,7 +30,7 @@
 ## 安装
 
 1. 浏览器安装 Tampermonkey / Violentmonkey。
-2. 打开仓库里的 [`linuxdo-ai-reply.user.js`](./linuxdo-ai-reply.user.js)。
+2. 打开 GitHub Raw 安装地址：`https://raw.githubusercontent.com/koala9527/linuxdo-ai-reply-userscript/main/linuxdo-ai-reply.user.js`。
 3. 在油猴扩展里新建脚本，复制粘贴保存。
 4. 打开任意 `https://linux.do/t/...` 帖子页面。
 5. 点击右下角 **AI 回帖** → **配置**，填入 Base URL / Key / Model / 提示词。
@@ -98,3 +99,7 @@ https://your-proxy.example.com/v1
 node --check linuxdo-ai-reply.user.js
 node scripts/validate.mjs
 ```
+
+## 自动更新
+
+脚本头部已配置 GitHub Raw 的 `@updateURL` 和 `@downloadURL`。后续只要递增 `@version` 并推送到 GitHub，Tampermonkey / Violentmonkey 就能按版本检查更新。
