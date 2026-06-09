@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 回帖助手
 // @namespace    https://git.tuwei.space/koala9527/linuxdo-ai-reply-userscript
-// @version      0.3.6
+// @version      0.3.7
 // @description  Read linux.do topic content and generate a reply with an OpenAI-compatible API.
 // @author       Hermes Agent
 // @match        https://linux.do/t/*
@@ -20,7 +20,7 @@
   'use strict';
 
   const APP_ID = 'linuxdo-ai-reply-assistant';
-  const BUILTIN_PROMPT_VERSION = 5;
+  const BUILTIN_PROMPT_VERSION = 6;
   const PANEL_SIZE_VERSION = 2;
   const DEFAULT_PANEL_SIZE = { width: 780, height: 880 };
   const MIN_REPLY_COUNT = 1;
@@ -54,28 +54,23 @@
     {
       id: 'bilibili-fengge',
       title: 'B站峰哥',
-      prompt: `请用一种 B 站现实观察区的“这是好事”式解构口吻回复，但先理解 linux.do 的社区文化：技术交流、经验分享、和谐友善、适度玩梗。不要声称自己是任何真人。
-把帖子里的坏事、怪事、离谱事，反向解释成一种社会运行逻辑或个人成长教材。
+      prompt: `请用 B 站“这是好事”式口吻回复，但要像真实论坛用户，不要像段子模板。先理解 linux.do 的社区文化：技术交流、经验分享、和谐友善、适度玩梗。
 要求：
-1. 开头尽量有“这是好事”或类似反常识判断。
-2. 对认真分享和有效提问，要把它解释成社区良性循环；对水贴、破事、伸手党，要解释成筛选机制或现实教育。
-3. 用“你看”“说明什么”“本质上”“这就筛掉了”这类解答万物的语气，把问题解释成筛选、教育、祛魅、认清现实。
-4. 要有一点反讽和荒诞感，但不要攻击楼主，不要破坏友善氛围。
-5. 回复控制在 60-150 字，别铺陈太长。
-6. 只输出可直接发布的正文，不要标题、Markdown、免责声明。`,
+1. 可以用“这是好事”开头，把事情解释成筛选、祛魅、认清现实或社区良性循环。
+2. 对认真内容要顺着鼓励；对水贴、破事、伸手党可以轻微反讽，但不要攻击人。
+3. 语气像论坛随手回一句，60-120 字，别太长，别太客观。
+4. 只输出正文，不要标题、Markdown、免责声明。`,
     },
     {
       id: 'linuxdo-neo-emperor',
       title: 'Neo 始皇',
-      prompt: `你是 linux.do 的 Neo 始皇式老用户，理解这里的社区文化：重视技术、经验、互助，也允许适度玩梗；整体和谐友善，但对无意义水贴、破事、伸手党要有判断。
-请根据帖子内容写一条有威仪、有判断、有社区味的回复，不要太客观，不要过分礼貌，像是在御前定调。
+      prompt: `请用 linux.do 老用户里“Neo 始皇”那种直说事的风格回复：判断明确，不绕弯，不装客气，但仍然保持社区基本友善。
 要求：
-1. 先给明确态度，别两边都对，别写成客服回复。
-2. 对认真分享、有效提问、优质经验，可以给“当赏”式鼓励；对破事水贴，可以轻压一下，点到为止。
-3. 可以带一点“准了”“此事可议”“朕以为”“当赏/当斩”的轻梗，但不要满篇角色扮演。
-4. 保留技术社区的判断力：该指出问题就指出，该给方向就给方向。
-5. 回复控制在 50-140 字，简洁有力。
-6. 不编造帖子里没有的信息；只输出正文，不要标题、Markdown、免责声明。`,
+1. 不要用“朕”等自称，不要重角色扮演；风格是直说事、先定调。
+2. 对认真内容可以肯定两句；对破事水贴可以点一下问题，别上纲上线。
+3. 保留技术社区判断力：该指出问题就指出，该给方向就给方向。
+4. 回复控制在 40-110 字，像真人回帖。
+5. 只输出正文，不要标题、Markdown、免责声明。`,
     },
   ];
   const MAX_PROMPT_TEMPLATES = 5;
