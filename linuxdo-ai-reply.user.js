@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 回帖助手
 // @namespace    https://git.tuwei.space/koala9527/linuxdo-ai-reply-userscript
-// @version      0.3.4
+// @version      0.3.5
 // @description  Read linux.do topic content and generate a reply with an OpenAI-compatible API.
 // @author       Hermes Agent
 // @match        https://linux.do/t/*
@@ -230,8 +230,8 @@
       const startHeight = rect.height;
 
       const move = (moveEvent) => {
-        const width = Math.min(Math.max(startWidth + moveEvent.clientX - startX, 460), window.innerWidth - 24);
-        const height = Math.min(Math.max(startHeight + moveEvent.clientY - startY, 620), window.innerHeight - 48);
+        const width = Math.min(Math.max(startWidth + startX - moveEvent.clientX, 460), window.innerWidth - 24);
+        const height = Math.min(Math.max(startHeight + startY - moveEvent.clientY, 620), window.innerHeight - 48);
         panel.style.width = `${width}px`;
         panel.style.height = `${height}px`;
       };
@@ -709,7 +709,7 @@
         min-width: min(460px, calc(100vw - 24px));
         min-height: 620px;
         overflow: auto;
-        resize: both;
+        resize: none;
         z-index: 99999;
         background: #f8fafc;
         color: #111827;
@@ -798,11 +798,11 @@
       #${APP_ID}-panel .switchline input:checked { background: #16a34a; }
       #${APP_ID}-panel .switchline input:checked::before { transform: translateX(20px); }
       #${APP_ID}-resize-handle {
-        position: sticky; left: 100%; bottom: 0; width: 22px; height: 22px; margin: 8px -8px -10px auto;
-        border-radius: 6px; cursor: nwse-resize;
+        position: sticky; left: 0; bottom: 0; width: 24px; height: 24px; margin: 8px auto -10px -8px;
+        border-radius: 6px; cursor: nesw-resize;
         background:
-          linear-gradient(135deg, transparent 45%, #94a3b8 46%, #94a3b8 54%, transparent 55%),
-          linear-gradient(135deg, transparent 62%, #cbd5e1 63%, #cbd5e1 70%, transparent 71%);
+          linear-gradient(45deg, transparent 45%, #94a3b8 46%, #94a3b8 54%, transparent 55%),
+          linear-gradient(45deg, transparent 62%, #cbd5e1 63%, #cbd5e1 70%, transparent 71%);
       }
       #${APP_ID}-prompt-tabs {
         display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 12px;
@@ -912,7 +912,7 @@
         <div id="${APP_ID}-format-note">模型会按 ===AI_REPLY_序号=== 固定格式输出，脚本只提取这些块用于复制。</div>
         <div id="${APP_ID}-status"></div>
       </div>
-      <div id="${APP_ID}-resize-handle" title="拖拽调整面板大小"></div>
+      <div id="${APP_ID}-resize-handle" title="从左下角向左上拖拽调整面板大小"></div>
     `;
     document.body.appendChild(panel);
     applyPanelSize(panel);
