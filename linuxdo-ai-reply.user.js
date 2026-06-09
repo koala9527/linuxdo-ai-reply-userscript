@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do AI 回帖助手
 // @namespace    https://git.tuwei.space/koala9527/linuxdo-ai-reply-userscript
-// @version      0.3.5
+// @version      0.3.6
 // @description  Read linux.do topic content and generate a reply with an OpenAI-compatible API.
 // @author       Hermes Agent
 // @match        https://linux.do/t/*
@@ -798,11 +798,15 @@
       #${APP_ID}-panel .switchline input:checked { background: #16a34a; }
       #${APP_ID}-panel .switchline input:checked::before { transform: translateX(20px); }
       #${APP_ID}-resize-handle {
-        position: sticky; left: 0; bottom: 0; width: 24px; height: 24px; margin: 8px auto -10px -8px;
-        border-radius: 6px; cursor: nesw-resize;
+        position: sticky; left: 0; bottom: 0; width: 30px; height: 22px; margin: 8px auto -6px 0;
+        border-radius: 8px; cursor: nesw-resize; opacity: .72;
         background:
-          linear-gradient(45deg, transparent 45%, #94a3b8 46%, #94a3b8 54%, transparent 55%),
-          linear-gradient(45deg, transparent 62%, #cbd5e1 63%, #cbd5e1 70%, transparent 71%);
+          radial-gradient(circle at 6px 16px, #94a3b8 0 1.5px, transparent 1.8px),
+          radial-gradient(circle at 14px 16px, #94a3b8 0 1.5px, transparent 1.8px),
+          radial-gradient(circle at 6px 8px, #cbd5e1 0 1.5px, transparent 1.8px);
+      }
+      #${APP_ID}-resize-handle:hover {
+        opacity: 1; background-color: #f1f5f9;
       }
       #${APP_ID}-prompt-tabs {
         display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 12px;
