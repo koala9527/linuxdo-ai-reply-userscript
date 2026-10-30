@@ -1,152 +1,163 @@
 // ==UserScript==
-// @name         Linux.do AI 回帖助手
-// @namespace    https://git.tuwei.space/koala9527/linuxdo-ai-reply-userscript
-// @version      0.3.7
-// @description  Read linux.do topic content and generate a reply with an OpenAI-compatible API.
+// @name         Linux.do 有一说一 · 回帖助手
+// @namespace    https://github.com/koala9527/linuxdo-ai-reply-userscript
+// @version      1.0.0
+// @description  在 linux.do 帖子页自动把「标题 + 本页内容」交给本地「有一说一」服务，生成一条可直接复制的回复；有结果时右下角按钮变色。
 // @author       Hermes Agent
-// @match        https://linux.do/t/*
-// @match        https://www.linux.do/t/*
+// @match        https://linux.do/*
+// @match        https://www.linux.do/*
 // @updateURL    https://raw.githubusercontent.com/koala9527/linuxdo-ai-reply-userscript/main/linuxdo-ai-reply.user.js
 // @downloadURL  https://raw.githubusercontent.com/koala9527/linuxdo-ai-reply-userscript/main/linuxdo-ai-reply.user.js
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
+// @connect      127.0.0.1
+// @connect      localhost
 // @connect      *
 // @run-at       document-idle
+// @noframes
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const APP_ID = 'linuxdo-ai-reply-assistant';
-  const BUILTIN_PROMPT_VERSION = 6;
-  const PANEL_SIZE_VERSION = 2;
-  const DEFAULT_PANEL_SIZE = { width: 780, height: 880 };
-  const MIN_REPLY_COUNT = 1;
-  const MAX_REPLY_COUNT = 10;
-  const REPLY_BLOCK_RE = /===AI_REPLY_(\d{1,2})===\s*([\s\S]*?)(?=\n?===AI_REPLY_\d{1,2}===|$)/g;
-  const DEFAULT_PROMPT = `你是 linux.do 论坛的真实用户。请先理解 linux.do 的社区文化：技术交流、经验分享、玩梗适度、和谐友善，但不鼓励无意义灌水。
-请根据帖子内容写一条自然、有帮助的中文回复。
-要求：
-1. 简洁，不要长篇大论，通常 80-220 字。
-2. 语气友好、像真人论坛回复，不要像营销文案或 AI 公告。
-3. 对认真分享、有效提问、真实经验，可以给出鼓励、补充或建设性建议。
-4. 对明显水贴、破事、情绪化吐槽、伸手党内容，可以温和质疑、轻轻点醒，但不要上纲上线。
-5. 不要编造帖子里没有的信息。
-6. 不要输出“作为 AI”“免责声明”等套话。`;
-  const BUILTIN_PROMPT_TEMPLATES = [
-    {
-      id: 'tieba-bro',
-      title: '贴吧老哥',
-      prompt: `你是懂 linux.do 社区文化的贴吧神回复型老哥：知道这里重视技术交流、经验分享、互相帮忙，也容得下适度玩梗；整体保持和谐友善，但遇到明显水贴、破事、伸手党，可以用短句轻轻质疑一下。
-请根据帖子内容写一条短、歪、准、有记忆点的中文回复，像能被楼下疯狂引用的评论。
-要求：
-1. 回复必须短，15-60 字优先，最多 90 字。
-2. 对认真内容可以夸一句、抬一手；对纯水/破事可以犀利一点，但要像论坛老哥吐槽，不要恶意攻击。
-3. 不要正经长篇解答，优先找一个刁钻角度、反转角度或离谱类比，一句话打中笑点/槽点。
-4. 像神评：前半句正常，后半句突然拐弯；或者直接一句话把楼主处境概括成梗。
-5. 可以阴阳一点，但不做人身攻击，不骂身份和群体。
-6. 少建议、少分析、少“我觉得”；不要客服腔，不要论文腔。
-7. 可用“绷不住”“典中典”“这下”“属于是”“味太冲了”等口语，但每条最多用一个梗词。
-8. 不编造帖子里没有的信息；只输出正文，不要标题、Markdown、免责声明。`,
-    },
-    {
-      id: 'bilibili-fengge',
-      title: 'B站峰哥',
-      prompt: `请用 B 站“这是好事”式口吻回复，但要像真实论坛用户，不要像段子模板。先理解 linux.do 的社区文化：技术交流、经验分享、和谐友善、适度玩梗。
-要求：
-1. 可以用“这是好事”开头，把事情解释成筛选、祛魅、认清现实或社区良性循环。
-2. 对认真内容要顺着鼓励；对水贴、破事、伸手党可以轻微反讽，但不要攻击人。
-3. 语气像论坛随手回一句，60-120 字，别太长，别太客观。
-4. 只输出正文，不要标题、Markdown、免责声明。`,
-    },
-    {
-      id: 'linuxdo-neo-emperor',
-      title: 'Neo 始皇',
-      prompt: `请用 linux.do 老用户里“Neo 始皇”那种直说事的风格回复：判断明确，不绕弯，不装客气，但仍然保持社区基本友善。
-要求：
-1. 不要用“朕”等自称，不要重角色扮演；风格是直说事、先定调。
-2. 对认真内容可以肯定两句；对破事水贴可以点一下问题，别上纲上线。
-3. 保留技术社区判断力：该指出问题就指出，该给方向就给方向。
-4. 回复控制在 40-110 字，像真人回帖。
-5. 只输出正文，不要标题、Markdown、免责声明。`,
-    },
-  ];
-  const MAX_PROMPT_TEMPLATES = 5;
+  // 防止脚本被重复注入（重复注入会出现两个悬浮按钮）
+  if (window.__LDYA_LOADED__) return;
+  window.__LDYA_LOADED__ = true;
 
-  const state = {
-    busy: false,
-    lastReply: '',
-    lastReplies: [],
-    promptTemplates: [],
-    activePromptTemplateId: '',
-    lastAutoGenerateTopicKey: '',
+  /* ==========================================================================
+   * 1. 常量与默认配置
+   * ========================================================================== */
+
+  const APP = 'ldya';
+  const VERSION = '1.0.0';
+
+  const STORE_KEY_CONFIG = APP + ':config';
+  const STORE_KEY_CACHE = APP + ':cache';
+
+  const DEFAULT_CONFIG = {
+    // 有一说一服务地址（本地默认 8011）
+    apiBase: 'http://127.0.0.1:8011',
+    // 语气：direct 直接 / calm 平和 / sharp 犀利
+    tone: 'direct',
+    // 进入帖子页后是否自动请求
+    auto: true,
+    // 发送给服务的内容上限（接口硬上限 2000）
+    maxChars: 1900,
   };
 
-  const $ = (selector, root = document) => root.querySelector(selector);
-  const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+  const TONE_OPTIONS = [
+    { id: 'direct', label: '直接' },
+    { id: 'calm', label: '平和' },
+    { id: 'sharp', label: '犀利' },
+  ];
 
-  function normalizeBaseUrl(baseUrl) {
-    return (baseUrl || '').trim().replace(/\/+$/, '');
+  const REQUEST_TIMEOUT = 180000; // 单次生成通常 35-70 秒，留足余量
+  const MIN_INPUT_LEN = 8;
+  const MAX_INPUT_LEN = 2000;
+  const CACHE_LIMIT = 30;
+  const CACHE_TTL = 24 * 60 * 60 * 1000;
+  const AUTO_COOLDOWN = 20000; // 同一帖子 20 秒内不重复自动请求
+  const CONTENT_WAIT_TIMEOUT = 12000;
+
+  /* ==========================================================================
+   * 2. 配置与缓存存储
+   * ========================================================================== */
+
+  const store = {
+    get(key, fallback) {
+      try {
+        const raw = typeof GM_getValue === 'function' ? GM_getValue(key, null) : null;
+        if (raw === null || raw === undefined) return fallback;
+        if (typeof raw === 'string') {
+          try {
+            return JSON.parse(raw);
+          } catch (_) {
+            return raw;
+          }
+        }
+        return raw;
+      } catch (_) {
+        return fallback;
+      }
+    },
+    set(key, value) {
+      try {
+        if (typeof GM_setValue === 'function') GM_setValue(key, JSON.stringify(value));
+      } catch (_) {
+        /* 存储失败不影响主流程 */
+      }
+    },
+  };
+
+  let config = Object.assign({}, DEFAULT_CONFIG, store.get(STORE_KEY_CONFIG, {}) || {});
+
+  function saveConfig(patch) {
+    config = Object.assign({}, config, patch || {});
+    store.set(STORE_KEY_CONFIG, config);
   }
 
-  function buildChatCompletionsUrl(baseUrl) {
-    const normalized = normalizeBaseUrl(baseUrl);
-    if (!normalized) return '';
-    if (/\/chat\/completions(?:[?#].*)?$/i.test(normalized)) return normalized;
-    return `${normalized}/chat/completions`;
+  function normalizeApiBase(value) {
+    return String(value || '')
+      .trim()
+      .replace(/\/+$/, '');
   }
 
-  function summarizeResponseBody(body, maxLength = 500) {
-    return (body || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+  function apiUrl(path) {
+    return normalizeApiBase(config.apiBase) + path;
   }
 
-  function maskUrl(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    try {
-      const url = new URL(raw);
-      const pathHint = /\/chat\/completions/i.test(url.pathname)
-        ? '/chat/completions'
-        : (/\/v1(?:\/|$)/i.test(url.pathname) ? '/v1/...' : '/...');
-      return `${url.protocol}//***${pathHint}`;
-    } catch (_) {
-      return raw.replace(/[A-Za-z0-9.-]+\.[A-Za-z]{2,}[\w./?&=%:-]*/g, '***');
+  /* --------------------------------------------------------------------------
+   * 结果缓存：同一帖子/同一页再次进入时直接复用，避免重复等 40 秒
+   * ------------------------------------------------------------------------ */
+
+  const cache = new Map();
+
+  function loadCache() {
+    const raw = store.get(STORE_KEY_CACHE, {}) || {};
+    const now = Date.now();
+    Object.keys(raw).forEach((key) => {
+      const entry = raw[key];
+      if (!entry || !entry.result) return;
+      if (now - (entry.at || 0) > CACHE_TTL) return;
+      cache.set(key, entry);
+    });
+  }
+
+  function readCache(key) {
+    const entry = cache.get(key);
+    if (!entry) return null;
+    if (Date.now() - (entry.at || 0) > CACHE_TTL) {
+      cache.delete(key);
+      return null;
     }
+    return entry;
   }
 
-  function maskSecretValue(value) {
-    const text = String(value || '');
-    if (!text) return '';
-    if (text.length <= 8) return '*'.repeat(text.length);
-    return `${text.slice(0, 3)}${'*'.repeat(Math.min(12, text.length - 6))}${text.slice(-3)}`;
-  }
-
-  function sanitizeLogMessage(message) {
-    let text = String(message || '');
-    const config = getConfig();
-    const urls = [
-      config.baseUrl,
-      buildChatCompletionsUrl(config.baseUrl),
-      $(`#${APP_ID}-base-url`)?.value,
-      buildChatCompletionsUrl($(`#${APP_ID}-base-url`)?.value || ''),
-    ].filter(Boolean);
-    const keys = [config.apiKey, $(`#${APP_ID}-api-key`)?.value].filter(Boolean);
-
-    for (const url of urls) {
-      text = text.split(url).join(maskUrl(url));
+  function writeCache(key, payload) {
+    cache.set(key, payload);
+    while (cache.size > CACHE_LIMIT) {
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
     }
-    text = text.replace(/https?:\/\/[^\s'"<>]+/gi, (url) => maskUrl(url));
-    for (const key of keys) {
-      text = text.split(key).join(maskSecretValue(key));
-    }
-    text = text.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer ***');
-    return text;
+    const plain = {};
+    cache.forEach((value, k) => {
+      plain[k] = value;
+    });
+    store.set(STORE_KEY_CACHE, plain);
   }
+
+  /* ==========================================================================
+   * 3. 通用工具
+   * ========================================================================== */
+
+  const $ = (selector, root) => (root || document).querySelector(selector);
+  const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
 
   function escapeHtml(value) {
-    return String(value || '')
+    return String(value === null || value === undefined ? '' : value)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -154,990 +165,1373 @@
       .replace(/'/g, '&#39;');
   }
 
-  function describeApiError(response, data, url) {
-    const bodySummary = summarizeResponseBody(response.responseText);
-    const message = data?.error?.message || data?.message;
-    if (message) return `生成失败：${message}`;
-
-    if (/service temporarily unavailable/i.test(bodySummary)) {
-      return [
-        '中转站返回 Service temporarily unavailable，通常是中转站临时不可用、上游线路异常或当前模型不可用。',
-        `当前请求地址：${maskUrl(url)}`,
-        '请稍后重试，或在中转站控制台确认该模型/线路可用、余额正常。',
-      ].join('\n');
-    }
-
-    if (/^\s*</.test(response.responseText || '')) {
-      return [
-        `接口返回了网页 HTML，不是 OpenAI JSON。当前请求地址：${maskUrl(url)}`,
-        '请确认 Base URL 填的是中转站 API 入口，不是控制台/官网首页；OpenAI 兼容地址通常应能拼成 /v1/chat/completions。',
-        bodySummary ? '返回片段已隐藏，避免暴露中转站信息。' : '',
-      ].filter(Boolean).join('\n');
-    }
-
-    const status = response.status ? `HTTP ${response.status}` : '请求失败';
-    return `生成失败：${status}\n当前请求地址：${maskUrl(url)}${bodySummary ? '\n返回内容已隐藏，避免暴露中转站信息。' : ''}`;
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
   }
 
-  function getRequestUrlHint(baseUrl) {
-    const normalized = normalizeBaseUrl(baseUrl);
-    if (!normalized) return '';
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    const requestUrl = buildChatCompletionsUrl(normalized);
-    const hint = [`实际请求地址：${maskUrl(requestUrl)}`];
-    if (!/\/(?:v1|chat\/completions)(?:[/?#]|$)/i.test(normalized)) {
-      hint.push('如果你的中转站是 OpenAI 兼容接口，Base URL 通常需要填到 /v1。');
-    }
-    return hint.join('\n');
-  }
-
-  function getPanelSize() {
-    const version = Number(GM_getValue('panelSizeVersion', 0));
-    const useStoredSize = version >= PANEL_SIZE_VERSION;
-    return {
-      width: useStoredSize ? Number(GM_getValue('panelWidth', DEFAULT_PANEL_SIZE.width)) || DEFAULT_PANEL_SIZE.width : DEFAULT_PANEL_SIZE.width,
-      height: useStoredSize ? Number(GM_getValue('panelHeight', DEFAULT_PANEL_SIZE.height)) || DEFAULT_PANEL_SIZE.height : DEFAULT_PANEL_SIZE.height,
+  function debounce(fn, wait) {
+    let timer = 0;
+    return function debounced() {
+      const args = arguments;
+      clearTimeout(timer);
+      timer = setTimeout(() => fn.apply(null, args), wait);
     };
   }
 
-  function applyPanelSize(panel) {
-    const size = getPanelSize();
-    panel.style.width = `${Math.min(Math.max(size.width, 460), window.innerWidth - 24)}px`;
-    panel.style.height = `${Math.min(Math.max(size.height, 620), window.innerHeight - 48)}px`;
+  function formatDuration(ms) {
+    const value = Number(ms) || 0;
+    if (value < 1000) return value + 'ms';
+    return (value / 1000).toFixed(1) + 's';
   }
 
-  function rememberPanelSize(panel) {
-    const rect = panel.getBoundingClientRect();
-    GM_setValue('panelWidth', Math.round(rect.width));
-    GM_setValue('panelHeight', Math.round(rect.height));
-    GM_setValue('panelSizeVersion', PANEL_SIZE_VERSION);
-  }
-
-  function attachPanelResizeHandle(panel) {
-    const handle = $(`#${APP_ID}-resize-handle`, panel);
-    if (!handle) return;
-    handle.addEventListener('mousedown', (event) => {
-      event.preventDefault();
-      const rect = panel.getBoundingClientRect();
-      const startX = event.clientX;
-      const startY = event.clientY;
-      const startWidth = rect.width;
-      const startHeight = rect.height;
-
-      const move = (moveEvent) => {
-        const width = Math.min(Math.max(startWidth + startX - moveEvent.clientX, 460), window.innerWidth - 24);
-        const height = Math.min(Math.max(startHeight + startY - moveEvent.clientY, 620), window.innerHeight - 48);
-        panel.style.width = `${width}px`;
-        panel.style.height = `${height}px`;
-      };
-      const stop = () => {
-        document.removeEventListener('mousemove', move);
-        document.removeEventListener('mouseup', stop);
-        rememberPanelSize(panel);
-      };
-
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', stop);
-    });
-  }
-
-  function toggleSecretInput(inputId, buttonId) {
-    const input = $(`#${inputId}`);
-    const button = $(`#${buttonId}`);
-    if (!input || !button) return;
-    const hidden = input.type === 'password';
-    input.type = hidden ? 'text' : 'password';
-    button.textContent = hidden ? '隐藏' : '显示';
-    button.setAttribute('aria-label', hidden ? '隐藏内容' : '显示内容');
-  }
-
-  function clampReplyCount(value) {
-    const number = Number.parseInt(value, 10);
-    if (!Number.isFinite(number)) return MIN_REPLY_COUNT;
-    return Math.min(Math.max(number, MIN_REPLY_COUNT), MAX_REPLY_COUNT);
-  }
-
-  function extractReplyBlocks(rawText, expectedCount) {
-    const replies = [];
-    REPLY_BLOCK_RE.lastIndex = 0;
-    let match;
-    while ((match = REPLY_BLOCK_RE.exec(rawText || ''))) {
-      const index = Number.parseInt(match[1], 10);
-      const content = (match[2] || '').trim();
-      if (index >= MIN_REPLY_COUNT && index <= MAX_REPLY_COUNT && content) {
-        replies[index - 1] = content;
-      }
-    }
-
-    return replies.filter(Boolean).slice(0, expectedCount);
-  }
-
-  function formatRepliesForCopy(replies) {
-    return replies.map((reply, index) => `${index + 1}. ${reply}`).join('\n\n');
-  }
-
-  function renderReplyCards(replies) {
-    const list = $(`#${APP_ID}-reply-list`);
-    if (!list) return;
-    if (!replies.length) {
-      list.innerHTML = '<div class="reply-empty">生成后会按条展示，每条都可以单独复制。</div>';
-      return;
-    }
-
-    list.innerHTML = replies.map((reply, index) => `
-      <div class="reply-card">
-        <div class="reply-card-head">
-          <strong>候选 ${index + 1}</strong>
-          <button type="button" data-copy-reply-index="${index}">复制这一条</button>
-        </div>
-        <textarea id="${APP_ID}-reply-${index}" spellcheck="false">${escapeHtml(reply)}</textarea>
-      </div>
-    `).join('');
-  }
-
-  function getReplyTextByIndex(index) {
-    const textarea = $(`#${APP_ID}-reply-${index}`);
-    return (textarea?.value || state.lastReplies[index] || '').trim();
-  }
-
-  function getCurrentReplyTexts() {
-    const fromDom = $$(`#${APP_ID}-reply-list textarea`)
-      .map((textarea) => textarea.value.trim())
-      .filter(Boolean);
-    return fromDom.length ? fromDom : state.lastReplies.filter(Boolean);
-  }
-
-  function clonePromptTemplate(template) {
-    return { ...template };
-  }
-
-  function getBuiltinPromptTemplate(id) {
-    return BUILTIN_PROMPT_TEMPLATES.find((template) => template.id === id);
-  }
-
-  function readStoredPromptTemplates() {
-    const raw = GM_getValue('promptTemplates', null);
-    if (!raw) return [];
+  function formatClock(ts) {
     try {
-      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-      return Array.isArray(parsed) ? parsed : [];
+      const d = new Date(ts);
+      return (
+        String(d.getHours()).padStart(2, '0') +
+        ':' +
+        String(d.getMinutes()).padStart(2, '0')
+      );
     } catch (_) {
-      return [];
+      return '';
     }
   }
 
-  function shouldRefreshBuiltinPromptTemplates() {
-    return Number(GM_getValue('builtinPromptVersion', 0)) < BUILTIN_PROMPT_VERSION;
+  /* ==========================================================================
+   * 4. 页面解析：只读当前帖子页 DOM，取标题与本页楼层内容
+   * ========================================================================== */
+
+  /**
+   * 从路径解析帖子 id 与锚点楼层。
+   * 支持 /t/slug/12345 、 /t/12345 、 /t/slug/12345/40 三种形态。
+   */
+  function parseTopicPath(pathname) {
+    const path = String(pathname || '');
+    const match = path.match(/^\/t\/(?:[^/]+\/)?(\d+)(?:\/(\d+))?/);
+    if (!match) return null;
+    return {
+      topicId: match[1],
+      floor: match[2] ? Number(match[2]) : null,
+    };
   }
 
-  function normalizePromptTemplates() {
-    const stored = readStoredPromptTemplates();
-    const storedById = new Map(stored.filter((item) => item?.id).map((item) => [item.id, item]));
-    const legacyPrompt = (GM_getValue('prompt', '') || '').trim();
-    const refreshBuiltins = shouldRefreshBuiltinPromptTemplates();
+  function isTopicPage() {
+    return !!parseTopicPath(location.pathname);
+  }
 
-    const builtins = BUILTIN_PROMPT_TEMPLATES.map((builtin) => {
-      const storedTemplate = storedById.get(builtin.id);
-      const prompt = !refreshBuiltins && typeof storedTemplate?.prompt === 'string' && storedTemplate.prompt.trim()
-        ? storedTemplate.prompt
-        : builtin.prompt;
-      const title = !refreshBuiltins && typeof storedTemplate?.title === 'string' && storedTemplate.title.trim()
-        ? storedTemplate.title.trim()
-        : builtin.title;
-      return {
-        id: builtin.id,
-        title,
-        prompt,
-        builtin: true,
-      };
+  function cleanDocumentTitle(title) {
+    return String(title || '')
+      .replace(/\s*-\s*LINUX\s*DO\s*$/i, '')
+      .replace(/\s+-\s+[^-]+$/, '')
+      .trim();
+  }
+
+  /**
+   * 取帖子标题。
+   * 注意：滚动后 Discourse 会把 #topic-title 换成吸顶的 h1.header-title，
+   * 所以这里按「正文标题 → 吸顶标题 → document.title」依次兜底。
+   */
+  function getTopicTitle() {
+    const node =
+      $('#topic-title h1') || $('.fancy-title') || $('h1.header-title') || $('.header-title') || null;
+    let title = node ? String(node.textContent || '').trim() : '';
+    if (!title) title = cleanDocumentTitle(document.title);
+    return title;
+  }
+
+  /** 从帖子节点里抽出正文纯文本，剔除引用块、菜单和按钮等噪声。 */
+  function extractPostText(article) {
+    const cooked =
+      article.querySelector('.post__regular .cooked') ||
+      article.querySelector('.post__body .cooked') ||
+      article.querySelector('.topic-body .cooked') ||
+      article.querySelector('.cooked');
+    if (!cooked) return '';
+
+    const clone = cooked.cloneNode(true);
+
+    // 引用块会重复上一楼内容，去掉以免污染输入
+    $$('aside.quote, .quote, .cooked-selection-barrier, .post-menu-area, script, style, noscript', clone).forEach(
+      (node) => node.remove()
+    );
+
+    // 图片统一折叠成占位符，避免大段 alt 文本
+    $$('img', clone).forEach((img) => {
+      img.replaceWith(document.createTextNode(' [图片] '));
     });
 
-    const custom = stored
-      .filter((item) => item && !getBuiltinPromptTemplate(item.id))
-      .map((item) => ({
-        id: item.id || `custom-${Date.now()}`,
-        title: (item.title || '').trim(),
-        prompt: item.prompt || '',
-        builtin: false,
-      }))
-      .filter((item) => item.title && item.prompt.trim())
-      .slice(0, Math.max(0, MAX_PROMPT_TEMPLATES - builtins.length));
+    // 换行还原：块级元素收尾补换行
+    $$('br', clone).forEach((br) => br.replaceWith(document.createTextNode('\n')));
+    $$('p, li, blockquote, pre, h1, h2, h3, h4, h5, h6, div, tr', clone).forEach((el) => {
+      el.appendChild(document.createTextNode('\n'));
+    });
 
-    if (
-      legacyPrompt
-      && legacyPrompt !== DEFAULT_PROMPT.trim()
-      && !stored.length
-      && custom.length < MAX_PROMPT_TEMPLATES - builtins.length
-    ) {
-      custom.unshift({
-        id: 'custom-legacy-prompt',
-        title: '旧提示词',
-        prompt: legacyPrompt,
-        builtin: false,
-      });
-    }
-
-    return [...builtins, ...custom.slice(0, Math.max(0, MAX_PROMPT_TEMPLATES - builtins.length))];
-  }
-
-  function savePromptTemplates(templates) {
-    const normalized = templates
-      .map((template) => ({
-        id: template.id,
-        title: (template.title || '').trim(),
-        prompt: template.prompt || '',
-        builtin: Boolean(template.builtin),
-      }))
-      .filter((template) => template.id && template.title && template.prompt.trim())
-      .slice(0, MAX_PROMPT_TEMPLATES);
-    GM_setValue('promptTemplates', JSON.stringify(normalized));
-  }
-
-  function getActivePromptTemplateId(templates) {
-    const storedId = GM_getValue('activePromptTemplateId', '');
-    if (templates.some((template) => template.id === storedId)) return storedId;
-    return templates[0]?.id || BUILTIN_PROMPT_TEMPLATES[0].id;
-  }
-
-  function getActivePromptTemplate(templates = state.promptTemplates) {
-    return templates.find((template) => template.id === state.activePromptTemplateId) || templates[0];
-  }
-
-  function syncPromptDraftFromPanel() {
-    const active = getActivePromptTemplate();
-    const titleInput = $(`#${APP_ID}-prompt-title`);
-    const promptInput = $(`#${APP_ID}-prompt`);
-    if (!active || !titleInput || !promptInput) return;
-    active.title = titleInput.value.trim();
-    active.prompt = promptInput.value;
-  }
-
-  function validatePromptTemplates(templates) {
-    for (const template of templates) {
-      if (!template.title.trim()) return '提示词模板标题不能为空。';
-      if (!template.prompt.trim()) return '提示词模板内容不能为空。';
-      if (!template.builtin && (!template.title.trim() || !template.prompt.trim())) {
-        return '自定义模板必须填写非空标题和非空提示词才可以保存。';
-      }
-    }
-    return '';
-  }
-
-  function persistActivePromptTemplateId(id) {
-    state.activePromptTemplateId = id;
-    GM_setValue('activePromptTemplateId', id);
-  }
-
-  function renderPromptTabs() {
-    const tabs = $(`#${APP_ID}-prompt-tabs`);
-    if (!tabs) return;
-    tabs.innerHTML = state.promptTemplates.map((template, index) => {
-      const isActive = template.id === state.activePromptTemplateId;
-      const badge = template.builtin ? '预设' : '自定义';
-      return `
-        <button
-          type="button"
-          class="${isActive ? 'active' : ''}"
-          data-template-id="${escapeHtml(template.id)}"
-          title="${escapeHtml(template.title)}"
-        >
-          <span>${index + 1}. ${escapeHtml(template.title || '未命名')}</span>
-          <small>${badge}</small>
-        </button>
-      `;
-    }).join('');
-  }
-
-  function renderPromptEditor() {
-    const active = getActivePromptTemplate();
-    const titleInput = $(`#${APP_ID}-prompt-title`);
-    const promptInput = $(`#${APP_ID}-prompt`);
-    const meta = $(`#${APP_ID}-prompt-meta`);
-    const resetButton = $(`#${APP_ID}-reset-template`);
-    const deleteButton = $(`#${APP_ID}-delete-template`);
-    if (!active || !titleInput || !promptInput || !meta) return;
-
-    titleInput.value = active.title;
-    promptInput.value = active.prompt;
-    meta.textContent = active.builtin ? '前 3 个预设可修改、可重置、不可删除。' : '自定义模板可修改，可删除。';
-    if (resetButton) resetButton.disabled = !active.builtin;
-    if (deleteButton) deleteButton.disabled = active.builtin;
-    renderPromptTabs();
-  }
-
-  function switchPromptTemplate(id) {
-    syncPromptDraftFromPanel();
-    if (!state.promptTemplates.some((template) => template.id === id)) return;
-    if (state.activePromptTemplateId === id) return false;
-    persistActivePromptTemplateId(id);
-    renderPromptEditor();
-    return true;
-  }
-
-  function addCustomPromptTemplate() {
-    syncPromptDraftFromPanel();
-    const customCount = state.promptTemplates.filter((template) => !template.builtin).length;
-    const maxCustom = MAX_PROMPT_TEMPLATES - BUILTIN_PROMPT_TEMPLATES.length;
-    if (customCount >= maxCustom) {
-      setStatus(`最多保存 ${MAX_PROMPT_TEMPLATES} 组模板：3 组预设 + ${maxCustom} 组自定义。`, true);
-      return;
-    }
-
-    const template = {
-      id: `custom-${Date.now()}`,
-      title: `自定义 ${customCount + 1}`,
-      prompt: '请根据帖子内容写一条自然、有帮助、适合发布到 linux.do 的中文回复。不要声明自己是 AI，不要加标题。',
-      builtin: false,
-    };
-    state.promptTemplates.push(template);
-    persistActivePromptTemplateId(template.id);
-    renderPromptEditor();
-    setStatus('已添加自定义模板，保存前请确认标题和提示词都不为空。');
-  }
-
-  function resetActiveBuiltinTemplate() {
-    syncPromptDraftFromPanel();
-    const active = getActivePromptTemplate();
-    const builtin = active && getBuiltinPromptTemplate(active.id);
-    if (!active || !builtin) return;
-    Object.assign(active, clonePromptTemplate({ ...builtin, builtin: true }));
-    renderPromptEditor();
-    setStatus('当前预设已重置为默认提示词。');
-  }
-
-  function deleteActiveCustomTemplate() {
-    syncPromptDraftFromPanel();
-    const active = getActivePromptTemplate();
-    if (!active || active.builtin) return;
-    state.promptTemplates = state.promptTemplates.filter((template) => template.id !== active.id);
-    persistActivePromptTemplateId(state.promptTemplates[0]?.id || BUILTIN_PROMPT_TEMPLATES[0].id);
-    renderPromptEditor();
-    setStatus('自定义模板已删除。');
-  }
-
-  function getConfig() {
-    const templates = normalizePromptTemplates();
-    const activeId = getActivePromptTemplateId(templates);
-    const activeTemplate = templates.find((template) => template.id === activeId) || templates[0];
-    return {
-      baseUrl: normalizeBaseUrl(GM_getValue('baseUrl', '')),
-      apiKey: GM_getValue('apiKey', '') || '',
-      model: (GM_getValue('model', 'gpt-4o-mini') || 'gpt-4o-mini').trim(),
-      replyCount: clampReplyCount(GM_getValue('replyCount', 1)),
-      autoGenerate: Boolean(GM_getValue('autoGenerate', false)),
-      prompt: activeTemplate?.prompt || DEFAULT_PROMPT,
-      activePromptTemplateId: activeTemplate?.id || BUILTIN_PROMPT_TEMPLATES[0].id,
-      promptTemplates: templates,
-    };
-  }
-
-  function saveConfig(config) {
-    GM_setValue('baseUrl', normalizeBaseUrl(config.baseUrl));
-    GM_setValue('apiKey', config.apiKey || '');
-    GM_setValue('model', (config.model || '').trim() || 'gpt-4o-mini');
-    GM_setValue('replyCount', clampReplyCount(config.replyCount));
-    GM_setValue('autoGenerate', Boolean(config.autoGenerate));
-    GM_setValue('prompt', config.prompt || DEFAULT_PROMPT);
-    if (config.promptTemplates) savePromptTemplates(config.promptTemplates);
-    if (config.activePromptTemplateId) persistActivePromptTemplateId(config.activePromptTemplateId);
-    GM_setValue('builtinPromptVersion', BUILTIN_PROMPT_VERSION);
-  }
-
-  function textOf(node) {
-    return (node?.innerText || node?.textContent || '')
+    return String(clone.textContent || '')
       .replace(/\u00a0/g, ' ')
-      .replace(/[ \t]+\n/g, '\n')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/ *\n */g, '\n')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
   }
 
-  function clipText(text, maxLength) {
-    if (!text || text.length <= maxLength) return text || '';
-    return `${text.slice(0, maxLength)}\n……（已截断，原文约 ${text.length} 字）`;
+  function extractPostAuthor(article) {
+    const node =
+      article.querySelector('.names .first.username a') ||
+      article.querySelector('.names .username a') ||
+      article.querySelector('.topic-meta-data .username') ||
+      article.querySelector('[data-user-card]');
+    if (!node) return '';
+    const text = String(node.textContent || '').trim();
+    if (text) return text;
+    return String(node.getAttribute('data-user-card') || '').trim();
   }
 
-  function getTopicTitle() {
-    return textOf($('h1 a.fancy-title, h1 .fancy-title, h1, title')) || document.title.replace(/ - Linux\.do.*$/i, '').trim();
+  function extractPostFloor(article) {
+    const link = article.querySelector('a.post-date') || article.querySelector('.post-date a');
+    const href = link ? String(link.getAttribute('href') || '') : '';
+    const match = href.match(/\/(\d+)\/?$/);
+    if (match) return Number(match[1]);
+    const id = article.getAttribute('data-post-id');
+    return id ? Number(id) : null;
   }
 
-  function findPostCookedNodes() {
-    const selectors = [
-      'article[data-post-id] .cooked',
-      '.topic-post .cooked',
-      '#post_1 .cooked',
-      '.regular.contents .cooked',
-    ];
-    for (const selector of selectors) {
-      const nodes = $$(selector).filter((node) => textOf(node).length > 20);
-      if (nodes.length) return nodes;
-    }
-    return [];
-  }
+  /** 采集当前页面上的帖子内容（标题 + 本页所有已渲染楼层）。 */
+  function collectTopic() {
+    const parsed = parseTopicPath(location.pathname);
+    if (!parsed) return null;
 
-  function collectTopicContent() {
     const title = getTopicTitle();
-    const postNodes = findPostCookedNodes();
-    const mainPost = textOf(postNodes[0]);
-    const replies = postNodes.slice(1, 6).map((node, index) => `回复 ${index + 1}:\n${clipText(textOf(node), 700)}`);
 
-    const fallback = textOf($('main, #main-outlet, body'));
-    const body = mainPost || clipText(fallback, 3500);
+    const posts = $$('article[data-post-id]')
+      .map((article) => {
+        const text = extractPostText(article);
+        if (!text) return null;
+        const floor = extractPostFloor(article);
+        const container = article.closest('.topic-post');
+        const isOwner =
+          floor === 1 || (container && container.classList.contains('topic-owner')) || false;
+        return {
+          author: extractPostAuthor(article) || '匿名',
+          floor: floor,
+          text: text,
+          isOp: !!isOwner,
+        };
+      })
+      .filter(Boolean);
+
+    if (!title && !posts.length) return null;
 
     return {
-      title,
+      topicId: parsed.topicId,
+      anchorFloor: parsed.floor,
+      title: title,
+      posts: posts,
       url: location.href,
-      mainPost: clipText(body, 5000),
-      visibleReplies: replies,
+      key: buildTopicKey(parsed),
     };
   }
 
-  function buildUserMessage(topic, replyCount) {
-    const count = clampReplyCount(replyCount);
-    const formatLines = Array.from({ length: count }, (_, index) => [
-      `===AI_REPLY_${index + 1}===`,
-      `第 ${index + 1} 条回复正文`,
-    ].join('\n'));
-
-    return [
-      `帖子标题：${topic.title}`,
-      `帖子链接：${topic.url}`,
-      '',
-      '主帖内容：',
-      topic.mainPost || '（未能读取到主帖正文，请基于标题谨慎回复）',
-      '',
-      topic.visibleReplies.length ? '页面上可见的部分回复：' : '',
-      ...topic.visibleReplies,
-      '',
-      `请生成 ${count} 条可发布到该帖子的候选回复。`,
-      '必须严格使用下面的固定格式输出，不要添加解释、标题、Markdown、代码块或额外文字：',
-      '',
-      ...formatLines,
-    ].filter(Boolean).join('\n');
+  /**
+   * 缓存/去重用的键：帖子 id + 页码锚点。
+   * 只在路由变化时计算，滚动时 URL 变化不会触发重新请求。
+   */
+  function buildTopicKey(parsed) {
+    const params = new URLSearchParams(location.search);
+    const pageParam = params.get('page');
+    const anchor = pageParam ? 'p' + pageParam : 'f' + (parsed.floor || 1);
+    return parsed.topicId + '@' + anchor;
   }
 
-  function requestChatCompletion(config, topic) {
-    const url = buildChatCompletionsUrl(config.baseUrl);
-    const payload = {
-      model: config.model,
-      messages: [
-        { role: 'system', content: config.prompt || DEFAULT_PROMPT },
-        { role: 'user', content: buildUserMessage(topic, config.replyCount) },
-      ],
-      temperature: 0.7,
-      max_tokens: Math.max(700, clampReplyCount(config.replyCount) * 180),
-    };
+  /* ==========================================================================
+   * 5. 输入文本构造：标题 + 楼主 + 本页回复，裁剪到接口允许的长度
+   * ========================================================================== */
 
+  function buildInputText(topic) {
+    const limit = clamp(Number(config.maxChars) || DEFAULT_CONFIG.maxChars, 200, MAX_INPUT_LEN);
+    const lines = [];
+    lines.push('帖子标题：' + (topic.title || '（无标题）'));
+
+    const op = topic.posts.find((post) => post.isOp) || topic.posts[0] || null;
+    const others = topic.posts.filter((post) => post !== op);
+
+    if (op) {
+      lines.push('');
+      lines.push('【楼主】' + (op.text || ''));
+    }
+
+    let body = lines.join('\n');
+
+    if (others.length) {
+      const replyHeader = '\n\n【本页回复】\n';
+      const replyLines = [];
+      let used = body.length + replyHeader.length;
+
+      for (const post of others) {
+        const label = post.author + '：';
+        const flat = post.text.replace(/\s*\n+\s*/g, ' ').trim();
+        const room = limit - used - label.length - 1;
+        if (room < 12) break;
+        const text = flat.length > room ? flat.slice(0, room) + '…' : flat;
+        const line = label + text;
+        replyLines.push(line);
+        used += line.length + 1;
+      }
+
+      if (replyLines.length) body += replyHeader + replyLines.join('\n');
+    }
+
+    // 仍然超长：优先裁剪楼主正文
+    if (body.length > limit) {
+      const keep = Math.max(60, limit - 20);
+      body = body.slice(0, keep).replace(/\s+$/, '') + '\n（内容过长，已截断）';
+    }
+
+    return body.slice(0, MAX_INPUT_LEN).trim();
+  }
+
+  /* ==========================================================================
+   * 6. 接口调用：POST /api/v1/say-one
+   * ========================================================================== */
+
+  function requestSayOne(text, tone) {
     return new Promise((resolve, reject) => {
+      const url = apiUrl('/api/v1/say-one');
+      const payload = JSON.stringify({ text: text, tone: tone || config.tone });
+
+      const finish = (fn, value) => {
+        try {
+          fn(value);
+        } catch (err) {
+          console.error('[有一说一] 回调异常', err);
+        }
+      };
+
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        reject(new Error('当前脚本管理器不支持跨域请求，请使用 Tampermonkey / Violentmonkey'));
+        return;
+      }
+
       GM_xmlhttpRequest({
         method: 'POST',
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          Authorization: `Bearer ${config.apiKey}`,
-        },
-        data: JSON.stringify(payload),
-        timeout: 60000,
+        url: url,
+        headers: { 'Content-Type': 'application/json' },
+        data: payload,
+        timeout: REQUEST_TIMEOUT,
         onload(response) {
-          let data;
+          const raw = response.responseText || '';
+          let data = null;
           try {
-            data = JSON.parse(response.responseText || '{}');
-          } catch (error) {
-            reject(new Error(describeApiError(response, null, url)));
+            data = JSON.parse(raw);
+          } catch (_) {
+            data = null;
+          }
+
+          if (response.status >= 200 && response.status < 300 && data && data.reply) {
+            finish(resolve, data);
             return;
           }
-          if (response.status < 200 || response.status >= 300) {
-            reject(new Error(describeApiError(response, data, url)));
+
+          if (response.status >= 200 && response.status < 300 && data && !data.reply) {
+            finish(reject, new Error('服务没有返回回复内容'));
             return;
           }
-          const content = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
-          if (!content.trim()) {
-            reject(new Error('接口没有返回回复内容'));
-            return;
+
+          let message = '';
+          if (data && typeof data.detail === 'string') message = data.detail;
+          else if (data && data.detail && data.detail.message) message = data.detail.message;
+          if (!message) {
+            message =
+              response.status === 0
+                ? '连不上「有一说一」服务，请确认已启动且地址正确'
+                : 'HTTP ' + response.status;
           }
-          resolve(content.trim());
+          finish(reject, new Error(message));
         },
         onerror() {
-          reject(new Error('网络请求失败，请检查 Base URL、跨域/connect 权限或网络'));
+          finish(reject, new Error('网络请求失败，请确认「有一说一」服务已启动'));
         },
         ontimeout() {
-          reject(new Error('请求超时，请稍后重试或换用更快的模型'));
+          finish(reject, new Error('请求超时（超过 ' + Math.round(REQUEST_TIMEOUT / 1000) + ' 秒）'));
         },
       });
     });
   }
 
-  async function copyToClipboard(text) {
+  function checkHealth() {
+    return new Promise((resolve) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        resolve({ ok: false, message: '脚本管理器不支持跨域请求' });
+        return;
+      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: apiUrl('/api/health'),
+        timeout: 8000,
+        onload(response) {
+          try {
+            const data = JSON.parse(response.responseText || '{}');
+            resolve({ ok: !!data.ok, data: data });
+          } catch (_) {
+            resolve({ ok: false, message: '服务返回内容无法解析' });
+          }
+        },
+        onerror() {
+          resolve({ ok: false, message: '连不上服务' });
+        },
+        ontimeout() {
+          resolve({ ok: false, message: '服务响应超时' });
+        },
+      });
+    });
+  }
+
+  /* ==========================================================================
+   * 7. 运行状态
+   * ========================================================================== */
+
+  const state = {
+    status: 'idle', // idle | loading | ready | error
+    topicKey: '',
+    topic: null,
+    input: '',
+    result: null,
+    error: '',
+    startedAt: 0,
+    elapsed: 0,
+    fromCache: false,
+    panelOpen: false,
+    settingsOpen: false,
+    health: null,
+  };
+
+  let inflightKey = '';
+  let elapsedTimer = 0;
+  let lastAutoAt = 0;
+  let lastAutoTopicId = '';
+
+  function setStatus(status, patch) {
+    state.status = status;
+    if (patch) Object.assign(state, patch);
+    renderFab();
+    if (state.panelOpen) renderPanel();
+  }
+
+  function startElapsedTimer() {
+    stopElapsedTimer();
+    state.startedAt = Date.now();
+    elapsedTimer = setInterval(() => {
+      state.elapsed = Date.now() - state.startedAt;
+      renderFab();
+      if (state.panelOpen) renderPanelStatus();
+    }, 500);
+  }
+
+  function stopElapsedTimer() {
+    if (elapsedTimer) {
+      clearInterval(elapsedTimer);
+      elapsedTimer = 0;
+    }
+  }
+
+  /* ==========================================================================
+   * 8. 样式
+   * ========================================================================== */
+
+  const CSS = `
+  #${APP}-root {
+    --ldya-bg: #ffffff;
+    --ldya-fg: #1f2328;
+    --ldya-sub: #667085;
+    --ldya-line: #e6e8eb;
+    --ldya-soft: #f5f6f8;
+    --ldya-shadow: 0 16px 40px rgba(15, 23, 42, .16);
+    --ldya-idle: #5b6472;
+    --ldya-loading: #2563eb;
+    --ldya-ready: #16a34a;
+    --ldya-error: #dc2626;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+      "Microsoft YaHei", sans-serif;
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 2147483000;
+  }
+  #${APP}-root[data-theme="dark"] {
+    --ldya-bg: #1e2026;
+    --ldya-fg: #e8eaed;
+    --ldya-sub: #9aa3ae;
+    --ldya-line: #33373f;
+    --ldya-soft: #262a31;
+    --ldya-shadow: 0 16px 40px rgba(0, 0, 0, .5);
+  }
+  #${APP}-root * { box-sizing: border-box; }
+
+  .ldya-fab {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 46px;
+    padding: 0 18px 0 14px;
+    border: 0;
+    border-radius: 23px;
+    background: var(--ldya-idle);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, .22);
+    transition: background .25s ease, transform .18s ease, box-shadow .25s ease;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .ldya-fab:hover { transform: translateY(-1px); box-shadow: 0 12px 28px rgba(15, 23, 42, .28); }
+  .ldya-fab:active { transform: translateY(0); }
+  .ldya-fab[data-status="loading"] { background: var(--ldya-loading); }
+  .ldya-fab[data-status="ready"] { background: var(--ldya-ready); }
+  .ldya-fab[data-status="error"] { background: var(--ldya-error); }
+
+  .ldya-fab__icon {
+    display: inline-flex;
+    width: 20px;
+    height: 20px;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 20px;
+  }
+  .ldya-fab__icon svg { width: 20px; height: 20px; display: block; }
+
+  .ldya-fab__spinner {
+    width: 15px;
+    height: 15px;
+    border: 2px solid rgba(255, 255, 255, .35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: ldya-spin .8s linear infinite;
+  }
+  @keyframes ldya-spin { to { transform: rotate(360deg); } }
+
+  .ldya-fab__badge {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #facc15;
+    border: 2px solid #fff;
+    display: none;
+  }
+  .ldya-fab[data-status="ready"] .ldya-fab__badge {
+    display: block;
+    animation: ldya-pulse 1.6s ease-out infinite;
+  }
+  @keyframes ldya-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(250, 204, 21, .75); }
+    70% { box-shadow: 0 0 0 9px rgba(250, 204, 21, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0); }
+  }
+
+  .ldya-panel {
+    position: absolute;
+    right: 0;
+    bottom: 58px;
+    width: min(430px, calc(100vw - 32px));
+    max-height: min(72vh, 660px);
+    display: flex;
+    flex-direction: column;
+    background: var(--ldya-bg);
+    color: var(--ldya-fg);
+    border: 1px solid var(--ldya-line);
+    border-radius: 16px;
+    box-shadow: var(--ldya-shadow);
+    overflow: hidden;
+    animation: ldya-in .18s ease-out;
+  }
+  @keyframes ldya-in {
+    from { opacity: 0; transform: translateY(8px) scale(.985); }
+    to { opacity: 1; transform: none; }
+  }
+
+  .ldya-hd {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--ldya-line);
+    background: var(--ldya-soft);
+  }
+  .ldya-hd__title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: .2px;
+  }
+  .ldya-hd__dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ldya-idle);
+  }
+  .ldya-hd__dot[data-status="loading"] { background: var(--ldya-loading); }
+  .ldya-hd__dot[data-status="ready"] { background: var(--ldya-ready); }
+  .ldya-hd__dot[data-status="error"] { background: var(--ldya-error); }
+  .ldya-hd__meta { font-size: 12px; font-weight: 500; color: var(--ldya-sub); }
+  .ldya-hd__btns { display: flex; align-items: center; gap: 4px; }
+  .ldya-icon-btn {
+    width: 28px; height: 28px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 0; border-radius: 8px;
+    background: transparent; color: var(--ldya-sub);
+    font-size: 15px; line-height: 1; cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+  }
+  .ldya-icon-btn:hover { background: rgba(120, 130, 145, .14); color: var(--ldya-fg); }
+
+  .ldya-body {
+    padding: 14px;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.65;
+  }
+  .ldya-body::-webkit-scrollbar { width: 8px; }
+  .ldya-body::-webkit-scrollbar-thumb { background: rgba(120, 130, 145, .35); border-radius: 4px; }
+
+  .ldya-loading { display: flex; align-items: center; gap: 10px; color: var(--ldya-sub); padding: 8px 0 4px; }
+  .ldya-loading__bar {
+    flex: 1; height: 3px; border-radius: 2px; overflow: hidden; background: var(--ldya-line); position: relative;
+  }
+  .ldya-loading__bar::after {
+    content: ""; position: absolute; inset: 0; width: 40%;
+    background: var(--ldya-loading); border-radius: 2px;
+    animation: ldya-slide 1.4s ease-in-out infinite;
+  }
+  @keyframes ldya-slide { 0% { left: -40%; } 100% { left: 100%; } }
+
+  .ldya-reply {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 14.5px;
+    line-height: 1.72;
+    color: var(--ldya-fg);
+    padding: 12px 13px;
+    border-radius: 12px;
+    background: var(--ldya-soft);
+    border: 1px solid var(--ldya-line);
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  .ldya-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .ldya-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 34px; padding: 0 14px;
+    border-radius: 9px; border: 1px solid var(--ldya-line);
+    background: var(--ldya-bg); color: var(--ldya-fg);
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, transform .12s ease;
+  }
+  .ldya-btn:hover { background: var(--ldya-soft); }
+  .ldya-btn:active { transform: scale(.985); }
+  .ldya-btn--primary { background: var(--ldya-ready); border-color: var(--ldya-ready); color: #fff; }
+  .ldya-btn--primary:hover { background: #15803d; border-color: #15803d; }
+  .ldya-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  .ldya-points { margin-top: 14px; display: grid; gap: 8px; }
+  .ldya-point { display: flex; gap: 8px; align-items: flex-start; }
+  .ldya-point__k {
+    flex: 0 0 auto; min-width: 44px;
+    font-size: 12px; font-weight: 700; color: var(--ldya-sub);
+    padding-top: 1px;
+  }
+  .ldya-point__v { flex: 1; color: var(--ldya-fg); font-size: 12.5px; }
+  .ldya-tag {
+    display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
+    border-radius: 10px; font-size: 11px; font-weight: 700;
+    background: var(--ldya-soft); color: var(--ldya-sub); border: 1px solid var(--ldya-line);
+  }
+  .ldya-tag--high { background: rgba(22, 163, 74, .12); color: #15803d; border-color: rgba(22, 163, 74, .3); }
+  .ldya-tag--medium { background: rgba(37, 99, 235, .12); color: #1d4ed8; border-color: rgba(37, 99, 235, .3); }
+  .ldya-tag--low { background: rgba(148, 163, 184, .18); color: #475569; border-color: rgba(148, 163, 184, .35); }
+
+  .ldya-more { margin-top: 12px; border-top: 1px solid var(--ldya-line); padding-top: 10px; }
+  .ldya-more > summary {
+    cursor: pointer; font-size: 12px; font-weight: 600; color: var(--ldya-sub);
+    list-style: none; outline: none; display: flex; align-items: center; gap: 6px;
+  }
+  .ldya-more > summary::-webkit-details-marker { display: none; }
+  .ldya-more > summary::before { content: "›"; font-size: 14px; transition: transform .15s ease; }
+  .ldya-more[open] > summary::before { transform: rotate(90deg); }
+  .ldya-more > summary:hover { color: var(--ldya-fg); }
+  .ldya-pre {
+    margin: 8px 0 0;
+    padding: 10px 11px;
+    border-radius: 10px;
+    background: var(--ldya-soft);
+    border: 1px solid var(--ldya-line);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow: auto;
+    color: var(--ldya-fg);
+  }
+  .ldya-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin-top: 8px; font-size: 12px; }
+  .ldya-kv dt { color: var(--ldya-sub); }
+  .ldya-kv dd { margin: 0; color: var(--ldya-fg); }
+
+  .ldya-error {
+    padding: 12px;
+    border-radius: 10px;
+    background: rgba(220, 38, 38, .08);
+    border: 1px solid rgba(220, 38, 38, .25);
+    color: #b91c1c;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+  #${APP}-root[data-theme="dark"] .ldya-error { color: #fca5a5; }
+
+  .ldya-empty { color: var(--ldya-sub); font-size: 13px; padding: 6px 0; }
+
+  .ldya-settings { margin-top: 12px; }
+  .ldya-field { margin-top: 10px; }
+  .ldya-field > label {
+    display: block; font-size: 12px; font-weight: 600; color: var(--ldya-sub); margin-bottom: 5px;
+  }
+  .ldya-input, .ldya-select {
+    width: 100%; height: 34px; padding: 0 10px;
+    border-radius: 9px; border: 1px solid var(--ldya-line);
+    background: var(--ldya-bg); color: var(--ldya-fg);
+    font-size: 12.5px; outline: none;
+    transition: border-color .15s ease;
+  }
+  .ldya-input:focus, .ldya-select:focus { border-color: var(--ldya-loading); }
+  .ldya-inline { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ldya-fg); }
+  .ldya-inline input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--ldya-ready); }
+  .ldya-hint { margin-top: 8px; font-size: 11.5px; color: var(--ldya-sub); line-height: 1.6; }
+  .ldya-toast {
+    position: absolute; left: 50%; bottom: 68px; transform: translateX(-50%);
+    padding: 7px 14px; border-radius: 18px;
+    background: rgba(17, 24, 39, .92); color: #fff; font-size: 12.5px; font-weight: 500;
+    pointer-events: none; opacity: 0; transition: opacity .2s ease;
+    white-space: nowrap; z-index: 5;
+  }
+  .ldya-toast[data-show="1"] { opacity: 1; }
+  `;
+
+  function injectStyle() {
+    if (document.getElementById(APP + '-style')) return;
+    if (typeof GM_addStyle === 'function') {
+      GM_addStyle(CSS);
+      return;
+    }
+    const style = document.createElement('style');
+    style.id = APP + '-style';
+    style.textContent = CSS;
+    document.head.appendChild(style);
+  }
+
+  /* ==========================================================================
+   * 9. UI 渲染
+   * ========================================================================== */
+
+  let root = null;
+  let fab = null;
+  let panel = null;
+  let toastEl = null;
+  let toastTimer = 0;
+
+  function parseRgb(value) {
+    const match = String(value || '').match(/rgba?\(([^)]+)\)/i);
+    if (!match) return null;
+    const parts = match[1].split(',').map((item) => parseFloat(item));
+    if (parts.length < 3) return null;
+    return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+  }
+
+  function detectTheme() {
+    const candidates = [document.body, $('#main-outlet'), $('.d-header'), document.documentElement];
+    for (const el of candidates) {
+      if (!el) continue;
+      const rgb = parseRgb(getComputedStyle(el).backgroundColor);
+      if (!rgb || rgb.a < 0.2) continue;
+      const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+      return luminance > 0.55 ? 'light' : 'dark';
+    }
+    if (document.documentElement.classList.contains('dark') || document.body.classList.contains('dark')) {
+      return 'dark';
+    }
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  function ensureRoot() {
+    if (root && document.body.contains(root)) return root;
+    injectStyle();
+    root = document.createElement('div');
+    root.id = APP + '-root';
+    root.setAttribute('data-theme', detectTheme());
+
+    fab = document.createElement('button');
+    fab.type = 'button';
+    fab.className = 'ldya-fab';
+    fab.innerHTML =
+      '<span class="ldya-fab__icon"></span><span class="ldya-fab__text">有一说一</span><span class="ldya-fab__badge"></span>';
+    fab.addEventListener('click', () => togglePanel());
+
+    toastEl = document.createElement('div');
+    toastEl.className = 'ldya-toast';
+
+    root.appendChild(fab);
+    root.appendChild(toastEl);
+    document.body.appendChild(root);
+    renderFab();
+    return root;
+  }
+
+  function showToast(message) {
+    if (!toastEl) return;
+    toastEl.textContent = message;
+    toastEl.setAttribute('data-show', '1');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.setAttribute('data-show', '0'), 1800);
+  }
+
+  const ICONS = {
+    idle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.9 8.9 0 0 1-3.8-.9L3 21l1.9-5.1a8.4 8.4 0 0 1-.9-3.9 8.4 8.4 0 0 1 8.4-8.4 8.4 8.4 0 0 1 8.6 7.9z"/></svg>',
+    loading:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.9 8.9 0 0 1-3.8-.9L3 21l1.9-5.1a8.4 8.4 0 0 1-.9-3.9 8.4 8.4 0 0 1 8.4-8.4 8.4 8.4 0 0 1 8.6 7.9z"/></svg>',
+    ready:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+    error:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"/><path d="M12 16.5h.01"/><circle cx="12" cy="12" r="9"/></svg>',
+  };
+
+  function fabText() {
+    if (state.status === 'loading') {
+      const seconds = Math.max(0, Math.round(state.elapsed / 1000));
+      return '生成中 ' + seconds + 's';
+    }
+    if (state.status === 'ready') return '看回复';
+    if (state.status === 'error') return '生成失败';
+    return '有一说一';
+  }
+
+  function renderFab() {
+    if (!fab) return;
+    fab.setAttribute('data-status', state.status);
+    const icon = fab.querySelector('.ldya-fab__icon');
+    const text = fab.querySelector('.ldya-fab__text');
+    if (icon) {
+      icon.innerHTML =
+        state.status === 'loading' ? '<span class="ldya-fab__spinner"></span>' : ICONS[state.status] || ICONS.idle;
+    }
+    if (text) text.textContent = fabText();
+    fab.title = state.status === 'ready' ? '回复已生成，点击查看' : '有一说一 · 为当前页生成回复';
+  }
+
+  function togglePanel(force) {
+    const open = typeof force === 'boolean' ? force : !state.panelOpen;
+    state.panelOpen = open;
+    if (open) {
+      ensureRoot();
+      if (!panel || !root.contains(panel)) {
+        panel = document.createElement('div');
+        panel.className = 'ldya-panel';
+        root.appendChild(panel);
+      }
+      panel.style.display = 'flex';
+      renderPanel();
+      if (state.status === 'idle' && config.auto === false) {
+        // 手动模式下打开面板时，若已有内容则直接开始生成
+        maybeAutoGenerate({ manual: true });
+      }
+    } else if (panel) {
+      panel.style.display = 'none';
+    }
+  }
+
+  function confidenceTag(confidence) {
+    const map = {
+      high: { label: '高置信', cls: 'ldya-tag--high' },
+      medium: { label: '中置信', cls: 'ldya-tag--medium' },
+      low: { label: '低置信', cls: 'ldya-tag--low' },
+    };
+    const item = map[confidence] || { label: '未知', cls: '' };
+    return '<span class="ldya-tag ' + item.cls + '">' + escapeHtml(item.label) + '</span>';
+  }
+
+  function toneLabel(tone) {
+    const found = TONE_OPTIONS.find((item) => item.id === tone);
+    return found ? found.label : tone;
+  }
+
+  function renderPanelStatus() {
+    if (!panel) return;
+    const meta = panel.querySelector('.ldya-hd__meta');
+    const dot = panel.querySelector('.ldya-hd__dot');
+    if (dot) dot.setAttribute('data-status', state.status);
+    if (!meta) return;
+    if (state.status === 'loading') {
+      meta.textContent = '生成中 ' + Math.max(0, Math.round(state.elapsed / 1000)) + 's';
+    } else if (state.status === 'ready') {
+      meta.textContent = (state.fromCache ? '缓存 · ' : '') + formatClock((state.result && state.result.__at) || Date.now());
+    } else if (state.status === 'error') {
+      meta.textContent = '失败';
+    } else {
+      meta.textContent = '';
+    }
+  }
+
+  function renderPanel() {
+    if (!panel) return;
+    const settingsOpen = state.settingsOpen;
+    const detailsState = {
+      input: panel.querySelector('.ldya-more--input')?.open || false,
+      process: panel.querySelector('.ldya-more--process')?.open || false,
+    };
+
+    let bodyHtml = '';
+
+    if (state.status === 'loading') {
+      bodyHtml =
+        '<div class="ldya-loading"><span>正在生成回复</span><span class="ldya-loading__bar"></span></div>' +
+        '<div class="ldya-empty" style="margin-top:10px">已把本页标题与内容交给「有一说一」，通常需要 35–70 秒。</div>';
+    } else if (state.status === 'error') {
+      bodyHtml =
+        '<div class="ldya-error">' +
+        escapeHtml(state.error || '生成失败') +
+        '</div>' +
+        '<div class="ldya-row">' +
+        '<button class="ldya-btn ldya-btn--primary" data-act="regen">重试</button>' +
+        '<button class="ldya-btn" data-act="settings">检查设置</button>' +
+        '</div>';
+    } else if (state.status === 'ready' && state.result) {
+      const result = state.result;
+      const reply = String(result.reply || '').trim();
+      const points = [];
+      if (result.key_point) points.push(['判断', result.key_point]);
+      if (result.global_pattern) points.push(['共同看法', result.global_pattern]);
+      if (result.caveat) points.push(['说明', result.caveat]);
+
+      bodyHtml =
+        '<div class="ldya-reply" id="' +
+        APP +
+        '-reply-text">' +
+        escapeHtml(reply || '（服务没有返回回复正文）') +
+        '</div>' +
+        '<div class="ldya-row">' +
+        '<button class="ldya-btn ldya-btn--primary" data-act="copy">复制回复</button>' +
+        '<button class="ldya-btn" data-act="regen">重新生成</button>' +
+        '</div>' +
+        (points.length
+          ? '<div class="ldya-points">' +
+            points
+              .map(
+                (item) =>
+                  '<div class="ldya-point"><span class="ldya-point__k">' +
+                  escapeHtml(item[0]) +
+                  '</span><span class="ldya-point__v">' +
+                  escapeHtml(item[1]) +
+                  '</span></div>'
+              )
+              .join('') +
+            '</div>'
+          : '') +
+        '<details class="ldya-more ldya-more--process"><summary>过程与依据</summary>' +
+        '<dl class="ldya-kv">' +
+        '<dt>置信度</dt><dd>' +
+        confidenceTag(result.confidence) +
+        '</dd>' +
+        '<dt>检索规模</dt><dd>' +
+        escapeHtml(
+          result.process
+            ? (result.process.corpus_topics || 0).toLocaleString('zh-CN') +
+                ' 条帖子 · 召回 ' +
+                (result.process.unique_candidates || 0) +
+                ' · 引用 ' +
+                (result.process.cited_evidence_count || 0)
+            : '未知'
+        ) +
+        '</dd>' +
+        '<dt>耗时</dt><dd>' +
+        escapeHtml(
+          result.process && result.process.timings_ms ? formatDuration(result.process.timings_ms['总计']) : '-'
+        ) +
+        '</dd>' +
+        '<dt>语气</dt><dd>' +
+        escapeHtml(toneLabel(config.tone)) +
+        '</dd>' +
+        '</dl>' +
+        (result.evidence && result.evidence.length
+          ? '<div class="ldya-hint">参考的相似讨论：' +
+            escapeHtml(
+              result.evidence
+                .slice(0, 3)
+                .map((item) => (item.topic_hint || '').slice(0, 40))
+                .filter(Boolean)
+                .join(' / ')
+            ) +
+            '</div>'
+          : '') +
+        '</details>' +
+        '<details class="ldya-more ldya-more--input"><summary>输入预览（发给服务的内容）</summary>' +
+        '<pre class="ldya-pre">' +
+        escapeHtml(state.input) +
+        '</pre></details>';
+    } else {
+      bodyHtml =
+        '<div class="ldya-empty">' +
+        (isTopicPage() ? '还没有生成回复。' : '当前不在帖子详情页，打开任意帖子会自动生成。') +
+        '</div>' +
+        (isTopicPage()
+          ? '<div class="ldya-row"><button class="ldya-btn ldya-btn--primary" data-act="regen">生成回复</button></div>'
+          : '');
+    }
+
+    // 设置区
+    bodyHtml +=
+      '<details class="ldya-more ldya-settings"' +
+      (settingsOpen ? ' open' : '') +
+      '><summary>设置</summary>' +
+      '<div class="ldya-field"><label>服务地址</label>' +
+      '<input class="ldya-input" data-field="apiBase" value="' +
+      escapeHtml(config.apiBase) +
+      '" placeholder="http://127.0.0.1:8011" /></div>' +
+      '<div class="ldya-field"><label>语气</label>' +
+      '<select class="ldya-select" data-field="tone">' +
+      TONE_OPTIONS.map(
+        (item) =>
+          '<option value="' +
+          item.id +
+          '"' +
+          (config.tone === item.id ? ' selected' : '') +
+          '>' +
+          item.label +
+          '</option>'
+      ).join('') +
+      '</select></div>' +
+      '<div class="ldya-field"><label class="ldya-inline"><input type="checkbox" data-field="auto"' +
+      (config.auto ? ' checked' : '') +
+      ' /> 进入帖子页自动生成</label></div>' +
+      '<div class="ldya-field"><label>发送内容上限（字符）</label>' +
+      '<input class="ldya-input" data-field="maxChars" type="number" min="200" max="2000" step="100" value="' +
+      escapeHtml(config.maxChars) +
+      '" /></div>' +
+      '<div class="ldya-hint">修改后立即生效，服务地址变更会清空本次结果缓存。</div>' +
+      '</details>';
+
+    panel.innerHTML =
+      '<div class="ldya-hd">' +
+      '<div class="ldya-hd__title"><span class="ldya-hd__dot" data-status="' +
+      state.status +
+      '"></span>有一说一' +
+      '<span class="ldya-hd__meta"></span></div>' +
+      '<div class="ldya-hd__btns">' +
+      '<button class="ldya-icon-btn" data-act="refresh" title="重新检测页面">⟳</button>' +
+      '<button class="ldya-icon-btn" data-act="close" title="关闭">✕</button>' +
+      '</div>' +
+      '</div>' +
+      '<div class="ldya-body">' +
+      bodyHtml +
+      '</div>';
+
+    if (detailsState.input) {
+      const el = panel.querySelector('.ldya-more--input');
+      if (el) el.open = true;
+    }
+    if (detailsState.process) {
+      const el = panel.querySelector('.ldya-more--process');
+      if (el) el.open = true;
+    }
+
+    renderPanelStatus();
+    bindPanelEvents();
+  }
+
+  function bindPanelEvents() {
+    if (!panel || panel.__bound) return;
+    panel.__bound = true;
+
+    panel.addEventListener('click', (event) => {
+      const trigger = event.target.closest('[data-act]');
+      if (!trigger) return;
+      const act = trigger.getAttribute('data-act');
+
+      if (act === 'close') {
+        togglePanel(false);
+        return;
+      }
+      if (act === 'copy') {
+        const text = String((state.result && state.result.reply) || '').trim();
+        if (!text) return;
+        copyText(text).then((ok) => showToast(ok ? '已复制回复' : '复制失败，请手动选择文本'));
+        return;
+      }
+      if (act === 'regen') {
+        runGenerate({ manual: true });
+        return;
+      }
+      if (act === 'refresh') {
+        runGenerate({ manual: true, force: true });
+        return;
+      }
+      if (act === 'settings') {
+        state.settingsOpen = true;
+        renderPanel();
+        return;
+      }
+    });
+
+    // 设置区开合状态记忆
+    panel.addEventListener('toggle', (event) => {
+      const target = event.target;
+      if (target && target.classList && target.classList.contains('ldya-settings')) {
+        state.settingsOpen = !!target.open;
+      }
+    }, true);
+
+    panel.addEventListener('change', (event) => {
+      const field = event.target.getAttribute && event.target.getAttribute('data-field');
+      if (!field) return;
+      if (field === 'auto') {
+        saveConfig({ auto: !!event.target.checked });
+        return;
+      }
+      if (field === 'tone') {
+        saveConfig({ tone: event.target.value });
+        if (state.status === 'ready') showToast('语气已切换，重新生成后生效');
+        return;
+      }
+      if (field === 'maxChars') {
+        const value = clamp(Number(event.target.value) || DEFAULT_CONFIG.maxChars, 200, MAX_INPUT_LEN);
+        saveConfig({ maxChars: value });
+        event.target.value = String(value);
+        return;
+      }
+      if (field === 'apiBase') {
+        const value = normalizeApiBase(event.target.value) || DEFAULT_CONFIG.apiBase;
+        saveConfig({ apiBase: value });
+        event.target.value = value;
+        cache.clear();
+        store.set(STORE_KEY_CACHE, {});
+        state.health = null;
+        showToast('服务地址已更新');
+      }
+    });
+  }
+
+  async function copyText(text) {
+    try {
+      if (typeof GM_setClipboard === 'function') {
+        GM_setClipboard(text, 'text');
+        return true;
+      }
+    } catch (_) {
+      /* 继续尝试其他方式 */
+    }
     try {
       await navigator.clipboard.writeText(text);
       return true;
+    } catch (_) {
+      /* 继续降级 */
+    }
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.top = '-1000px';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      return ok;
     } catch (_) {
       return false;
     }
   }
 
-  function ensureStyles() {
-    GM_addStyle(`
-      #${APP_ID}-button {
-        position: fixed;
-        right: 20px;
-        bottom: 96px;
-        z-index: 99999;
-        border: 0;
-        border-radius: 999px;
-        padding: 11px 16px;
-        background: linear-gradient(135deg, #14532d, #2563eb);
-        color: #fff;
-        font-weight: 700;
-        box-shadow: 0 12px 30px rgba(15, 23, 42, .26);
-        cursor: pointer;
-      }
-      #${APP_ID}-button:hover { filter: brightness(1.05); }
-      #${APP_ID}-panel {
-        position: fixed;
-        right: 12px;
-        bottom: 84px;
-        width: min(720px, calc(100vw - 32px));
-        height: min(880px, calc(100vh - 48px));
-        max-width: calc(100vw - 24px);
-        max-height: calc(100vh - 48px);
-        min-width: min(460px, calc(100vw - 24px));
-        min-height: 620px;
-        overflow: auto;
-        resize: none;
-        z-index: 99999;
-        background: #f8fafc;
-        color: #111827;
-        border: 1px solid rgba(51, 65, 85, .18);
-        border-radius: 12px;
-        box-shadow: 0 22px 70px rgba(15, 23, 42, .34);
-        padding: 18px;
-        font-size: 14px;
-      }
-      #${APP_ID}-panel.hidden { display: none; }
-      #${APP_ID}-panel .panel-head {
-        display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px;
-      }
-      #${APP_ID}-panel .panel-title { font-size: 17px; font-weight: 800; letter-spacing: 0; }
-      #${APP_ID}-panel .panel-subtitle { color: #64748b; font-size: 12px; margin-top: 2px; }
-      #${APP_ID}-panel .section {
-        background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; margin-top: 12px;
-      }
-      #${APP_ID}-panel .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-      #${APP_ID}-panel .grid .wide { grid-column: 1 / -1; }
-      #${APP_ID}-panel label { display: block; margin: 0 0 5px; font-weight: 700; color: #334155; }
-      #${APP_ID}-panel .field-with-button { display: flex; gap: 8px; align-items: stretch; }
-      #${APP_ID}-panel .field-with-button input { min-width: 0; }
-      #${APP_ID}-panel .field-with-button button {
-        border: 0; border-radius: 8px; padding: 0 10px; cursor: pointer; font-weight: 700;
-        background: #e2e8f0; color: #0f172a; white-space: nowrap;
-      }
-      #${APP_ID}-panel input, #${APP_ID}-panel textarea {
-        width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 8px;
-        padding: 9px 10px; font: inherit; background: #fff; color: #111827; outline: none;
-      }
-      #${APP_ID}-panel input:focus, #${APP_ID}-panel textarea:focus {
-        border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, .12);
-      }
-      #${APP_ID}-panel textarea { min-height: 112px; resize: vertical; line-height: 1.55; }
-      #${APP_ID}-prompt { min-height: 220px; }
-      #${APP_ID}-panel .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
-      #${APP_ID}-panel .row button {
-        border: 0; border-radius: 8px; padding: 9px 12px; cursor: pointer; font-weight: 700;
-      }
-      #${APP_ID}-panel button:disabled { cursor: not-allowed; opacity: .45; }
-      #${APP_ID}-generate { background: #16a34a; color: white; }
-      #${APP_ID}-save { background: #2563eb; color: white; }
-      #${APP_ID}-close, #${APP_ID}-copy, #${APP_ID}-add-template, #${APP_ID}-reset-template, #${APP_ID}-delete-template {
-        background: #e2e8f0; color: #0f172a;
-      }
-      #${APP_ID}-delete-template:not(:disabled) { background: #fee2e2; color: #991b1b; }
-      #${APP_ID}-status { margin-top: 10px; white-space: pre-wrap; color: #475569; }
-      #${APP_ID}-format-note { color: #64748b; font-size: 12px; margin-top: 8px; }
-      #${APP_ID}-reply-list { display: grid; gap: 10px; margin-top: 8px; }
-      #${APP_ID}-reply-list .reply-empty {
-        color: #64748b; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 10px;
-        padding: 18px; text-align: center;
-      }
-      #${APP_ID}-reply-list .reply-card {
-        border: 1px solid #dbe3ea; border-radius: 10px; background: #f8fafc; padding: 10px;
-      }
-      #${APP_ID}-reply-list .reply-card-head {
-        display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px;
-      }
-      #${APP_ID}-reply-list .reply-card-head strong { color: #0f172a; }
-      #${APP_ID}-reply-list .reply-card-head button {
-        border: 0; border-radius: 8px; padding: 7px 10px; cursor: pointer; font-weight: 700;
-        background: #dcfce7; color: #166534; white-space: nowrap;
-      }
-      #${APP_ID}-reply-list textarea {
-        min-height: 92px; resize: vertical; background: #fff;
-      }
-      #${APP_ID}-panel .checkline { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-      #${APP_ID}-panel .checkline input { width: auto; }
-      #${APP_ID}-panel .switchline {
-        display: flex; align-items: center; justify-content: space-between; gap: 14px;
-        margin-top: 12px; padding: 11px 12px; border: 1px solid #dbe3ea; border-radius: 10px; background: #f8fafc;
-      }
-      #${APP_ID}-panel .switchline strong { display: block; color: #0f172a; }
-      #${APP_ID}-panel .switchline span { display: block; color: #64748b; font-size: 12px; margin-top: 2px; }
-      #${APP_ID}-panel .switchline input {
-        appearance: none; width: 46px; height: 26px; flex: 0 0 auto; cursor: pointer;
-        border: 0; border-radius: 999px; background: #cbd5e1; padding: 3px; position: relative;
-      }
-      #${APP_ID}-panel .switchline input::before {
-        content: ""; position: absolute; left: 3px; top: 3px; width: 20px; height: 20px;
-        border-radius: 999px; background: #fff; box-shadow: 0 1px 4px rgba(15, 23, 42, .25);
-        transition: transform .16s ease;
-      }
-      #${APP_ID}-panel .switchline input:checked { background: #16a34a; }
-      #${APP_ID}-panel .switchline input:checked::before { transform: translateX(20px); }
-      #${APP_ID}-resize-handle {
-        position: sticky; left: 0; bottom: 0; width: 30px; height: 22px; margin: 8px auto -6px 0;
-        border-radius: 8px; cursor: nesw-resize; opacity: .72;
-        background:
-          radial-gradient(circle at 6px 16px, #94a3b8 0 1.5px, transparent 1.8px),
-          radial-gradient(circle at 14px 16px, #94a3b8 0 1.5px, transparent 1.8px),
-          radial-gradient(circle at 6px 8px, #cbd5e1 0 1.5px, transparent 1.8px);
-      }
-      #${APP_ID}-resize-handle:hover {
-        opacity: 1; background-color: #f1f5f9;
-      }
-      #${APP_ID}-prompt-tabs {
-        display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 12px;
-      }
-      #${APP_ID}-prompt-tabs button {
-        border: 1px solid #cbd5e1; background: #f8fafc; color: #334155; border-radius: 999px;
-        padding: 7px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
-        max-width: 170px;
-      }
-      #${APP_ID}-prompt-tabs button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      #${APP_ID}-prompt-tabs button small {
-        color: #64748b; font-size: 11px; font-weight: 700;
-      }
-      #${APP_ID}-prompt-tabs button.active {
-        border-color: #14532d; background: #dcfce7; color: #14532d;
-      }
-      #${APP_ID}-prompt-meta { color: #64748b; font-size: 12px; margin-top: 8px; }
-      @media (max-width: 640px) {
-        #${APP_ID}-panel { right: 12px; bottom: 96px; padding: 14px; min-height: 560px; }
-        #${APP_ID}-panel .grid { grid-template-columns: 1fr; }
-      }
-    `);
+  function hideAll() {
+    if (root) root.style.display = 'none';
   }
 
-  function renderPanel() {
-    const config = getConfig();
-    state.promptTemplates = config.promptTemplates.map(clonePromptTemplate);
-    state.activePromptTemplateId = config.activePromptTemplateId;
-
-    const panel = document.createElement('div');
-    panel.id = `${APP_ID}-panel`;
-    panel.className = 'hidden';
-    panel.innerHTML = `
-      <div class="panel-head">
-        <div>
-          <div class="panel-title">Linux.do AI 回帖助手</div>
-          <div class="panel-subtitle">OpenAI 兼容接口 · 可切换提示词模板</div>
-        </div>
-        <button id="${APP_ID}-close" type="button">关闭</button>
-      </div>
-
-      <div class="section">
-        <div class="grid">
-          <div class="wide">
-            <label>Base URL</label>
-            <div class="field-with-button">
-              <input id="${APP_ID}-base-url" type="password" placeholder="https://api.example.com/v1" />
-              <button id="${APP_ID}-base-url-toggle" type="button">显示</button>
-            </div>
-          </div>
-          <div>
-            <label>API Key</label>
-            <div class="field-with-button">
-              <input id="${APP_ID}-api-key" type="password" placeholder="sk-..." />
-              <button id="${APP_ID}-api-key-toggle" type="button">显示</button>
-            </div>
-          </div>
-          <div>
-            <label>Model</label>
-            <input id="${APP_ID}-model" placeholder="gpt-4o-mini" />
-          </div>
-          <div>
-            <label>回复个数</label>
-            <input id="${APP_ID}-reply-count" type="number" min="1" max="10" step="1" placeholder="1-10" />
-          </div>
-        </div>
-        <label class="switchline" for="${APP_ID}-auto-generate">
-          <div>
-            <strong>进入帖子自动生成</strong>
-            <span>打开后识别到新帖子会立即生成候选回复，仍然只复制不打开回帖框。</span>
-          </div>
-          <input id="${APP_ID}-auto-generate" type="checkbox" />
-        </label>
-      </div>
-
-      <div class="section">
-        <label>提示词模板</label>
-        <div id="${APP_ID}-prompt-tabs"></div>
-        <div class="grid">
-          <div class="wide">
-            <label>模板标题</label>
-            <input id="${APP_ID}-prompt-title" placeholder="模板标题不能为空" />
-          </div>
-          <div class="wide">
-            <label>提示词</label>
-            <textarea id="${APP_ID}-prompt" placeholder="提示词不能为空"></textarea>
-          </div>
-        </div>
-        <div id="${APP_ID}-prompt-meta"></div>
-        <div class="row">
-          <button id="${APP_ID}-add-template" type="button">添加自定义</button>
-          <button id="${APP_ID}-reset-template" type="button">重置预设</button>
-          <button id="${APP_ID}-delete-template" type="button">删除自定义</button>
-        </div>
-      </div>
-
-      <div class="section">
-        <div class="row">
-          <button id="${APP_ID}-save" type="button">保存配置</button>
-          <button id="${APP_ID}-generate" type="button">生成回复</button>
-          <button id="${APP_ID}-copy" type="button">复制全部</button>
-        </div>
-        <label style="margin-top: 12px;">候选回复</label>
-        <div id="${APP_ID}-reply-list">
-          <div class="reply-empty">生成后会按条展示，每条都可以单独复制。</div>
-        </div>
-        <div id="${APP_ID}-format-note">模型会按 ===AI_REPLY_序号=== 固定格式输出，脚本只提取这些块用于复制。</div>
-        <div id="${APP_ID}-status"></div>
-      </div>
-      <div id="${APP_ID}-resize-handle" title="从左下角向左上拖拽调整面板大小"></div>
-    `;
-    document.body.appendChild(panel);
-    applyPanelSize(panel);
-
-    $(`#${APP_ID}-base-url`).value = config.baseUrl;
-    $(`#${APP_ID}-api-key`).value = config.apiKey;
-    $(`#${APP_ID}-model`).value = config.model;
-    $(`#${APP_ID}-reply-count`).value = config.replyCount;
-    $(`#${APP_ID}-auto-generate`).checked = config.autoGenerate;
-    renderPromptEditor();
-
-    return panel;
+  function showAll() {
+    if (root) root.style.display = '';
   }
 
-  function readPanelConfig() {
-    syncPromptDraftFromPanel();
-    const activeTemplate = getActivePromptTemplate();
-    return {
-      baseUrl: $(`#${APP_ID}-base-url`).value,
-      apiKey: $(`#${APP_ID}-api-key`).value,
-      model: $(`#${APP_ID}-model`).value,
-      replyCount: clampReplyCount($(`#${APP_ID}-reply-count`).value),
-      autoGenerate: $(`#${APP_ID}-auto-generate`).checked,
-      prompt: activeTemplate?.prompt || '',
-      activePromptTemplateId: activeTemplate?.id || state.activePromptTemplateId,
-      promptTemplates: state.promptTemplates.map(clonePromptTemplate),
-    };
-  }
+  /* ==========================================================================
+   * 10. 生成流程
+   * ========================================================================== */
 
-  function setStatus(message, isError = false) {
-    const node = $(`#${APP_ID}-status`);
-    if (!node) return;
-    node.textContent = sanitizeLogMessage(message);
-    node.style.color = isError ? '#dc2626' : '#475569';
-  }
-
-  function getTopicIdFromPath(pathname) {
-    const segments = String(pathname || '').split('/').filter(Boolean);
-    if (segments[0] !== 't') return '';
-
-    const numericSegments = segments.filter((segment) => /^\d+$/.test(segment));
-    return numericSegments.length ? numericSegments[0] : '';
-  }
-
-  function getAutoGenerateTopicKey() {
-    const topicId = getTopicIdFromPath(location.pathname);
-    return topicId ? `topic:${topicId}` : '';
-  }
-
-  function setLauncherState(label) {
-    const button = $(`#${APP_ID}-button`);
-    if (button) button.textContent = label;
-  }
-
-  async function generateReply(options = {}) {
-    if (state.busy) return;
-    const isAuto = Boolean(options.auto);
-    const isPromptSwitch = options.reason === 'prompt-switch';
-    const config = readPanelConfig();
-    const templateError = validatePromptTemplates(config.promptTemplates);
-    if (templateError) {
-      setStatus(templateError, true);
-      return;
-    }
-
-    if (!config.baseUrl || !config.apiKey || !config.model) {
-      setStatus('请先填写 Base URL、API Key 和 Model。', true);
-      return;
-    }
-    if ((isAuto || isPromptSwitch) && !getAutoGenerateTopicKey()) {
-      setStatus('当前不是帖子页，不会自动请求 AI。', true);
-      return;
-    }
-    saveConfig(config);
-
-    state.busy = true;
-    setLauncherState(isAuto ? 'AI 回帖 · 生成中' : 'AI 回帖');
-    const statusPrefix = isPromptSwitch
-      ? '已切换提示词，正在重新生成候选回复……'
-      : (isAuto ? '已识别到新帖子，正在自动生成候选回复……' : '正在读取帖子内容并请求 AI 生成……');
-    setStatus(`${statusPrefix}\n${getRequestUrlHint(config.baseUrl)}`);
-    try {
-      const topic = collectTopicContent();
-      const rawReply = await requestChatCompletion(config, topic);
-      const replies = extractReplyBlocks(rawReply, config.replyCount);
-      if (!replies.length) {
-        throw new Error('模型没有按固定格式返回回复，请重试或调整提示词。');
-      }
-      const formattedReply = formatRepliesForCopy(replies);
-      state.lastReply = formattedReply;
-      state.lastReplies = replies.slice();
-      renderReplyCards(replies);
-      const copied = (isAuto || isPromptSwitch) ? false : await copyToClipboard(formattedReply);
-      setLauncherState('AI 回帖 · 已生成');
-      setStatus([
-        `生成完成，已提取 ${replies.length}/${config.replyCount} 条候选回复。`,
-        (isAuto || isPromptSwitch) ? '自动生成不会改写剪贴板，需要时复制单条或复制全部。' : (copied ? '已复制全部候选回复到剪贴板。' : '剪贴板复制失败，可手动复制结果。'),
-        replies.length < config.replyCount ? '模型返回数量不足，可重新生成一次。' : '',
-      ].join('\n'));
-    } catch (error) {
-      console.error('[Linux.do AI 回帖助手]', error);
-      setStatus(error?.message || String(error), true);
-      setLauncherState('AI 回帖');
-    } finally {
-      state.busy = false;
-    }
-  }
-
-  function maybeAutoGenerate() {
-    const config = getConfig();
-    if (!config.autoGenerate) return;
-    if (!config.baseUrl || !config.apiKey || !config.model) return;
-
-    const topicKey = getAutoGenerateTopicKey();
-    if (!topicKey) return;
-    if (state.lastAutoGenerateTopicKey === topicKey) return;
-    state.lastAutoGenerateTopicKey = topicKey;
-    setTimeout(() => generateReply({ auto: true }), 900);
-  }
-
-  function watchTopicNavigation(onChange) {
-    let current = getAutoGenerateTopicKey();
-    const notify = () => {
-      const next = getAutoGenerateTopicKey();
-      if (next === current) return;
-      current = next;
-      state.lastReply = '';
-      state.lastReplies = [];
-      renderReplyCards([]);
-      setLauncherState('AI 回帖');
-      if (!next) return;
-      setTimeout(onChange, 700);
-    };
-
-    for (const method of ['pushState', 'replaceState']) {
-      const original = history[method];
-      history[method] = function (...args) {
-        const result = original.apply(this, args);
-        setTimeout(notify, 0);
-        return result;
+  function waitForContent(timeout) {
+    const limit = timeout || CONTENT_WAIT_TIMEOUT;
+    const started = Date.now();
+    return new Promise((resolve) => {
+      const tick = () => {
+        // 标题可能被吸顶栏替换，这里只等楼层渲染出来即可
+        const hasPost = $$('article[data-post-id]').length > 0;
+        if (hasPost) {
+          resolve(true);
+          return;
+        }
+        if (Date.now() - started > limit) {
+          resolve(false);
+          return;
+        }
+        setTimeout(tick, 250);
       };
-    }
-    window.addEventListener('popstate', notify);
+      tick();
+    });
   }
 
-  function init() {
-    if (document.getElementById(`${APP_ID}-button`)) return;
-    ensureStyles();
-    const panel = renderPanel();
-    const button = document.createElement('button');
-    button.id = `${APP_ID}-button`;
-    button.textContent = 'AI 回帖';
-    button.addEventListener('click', () => panel.classList.toggle('hidden'));
-    document.body.appendChild(button);
-
-    $(`#${APP_ID}-close`).addEventListener('click', () => panel.classList.add('hidden'));
-    $(`#${APP_ID}-base-url-toggle`).addEventListener('click', () => {
-      toggleSecretInput(`${APP_ID}-base-url`, `${APP_ID}-base-url-toggle`);
-    });
-    $(`#${APP_ID}-api-key-toggle`).addEventListener('click', () => {
-      toggleSecretInput(`${APP_ID}-api-key`, `${APP_ID}-api-key-toggle`);
-    });
-    $(`#${APP_ID}-reply-count`).addEventListener('change', (event) => {
-      event.target.value = clampReplyCount(event.target.value);
-    });
-    $(`#${APP_ID}-auto-generate`).addEventListener('change', (event) => {
-      const config = readPanelConfig();
-      saveConfig(config);
-      if (event.target.checked) {
-        setStatus('已开启进入帖子自动生成。');
-        state.lastAutoGenerateTopicKey = '';
-        maybeAutoGenerate();
-      } else {
-        setStatus('已关闭进入帖子自动生成。');
-      }
-    });
-    attachPanelResizeHandle(panel);
-    new ResizeObserver(() => rememberPanelSize(panel)).observe(panel);
-    $(`#${APP_ID}-save`).addEventListener('click', () => {
-      const config = readPanelConfig();
-      const templateError = validatePromptTemplates(config.promptTemplates);
-      if (templateError) {
-        setStatus(templateError, true);
+  async function runGenerate(options) {
+    const opts = options || {};
+    if (inflightKey && !opts.force) {
+      // 同一帖子/同一页正在生成时才拦截；换帖可以直接开始新的
+      const nextKey = currentRouteSignature();
+      if (nextKey === inflightKey) {
+        showToast('正在生成中，请稍候');
         return;
       }
-      saveConfig(config);
-      setStatus('配置已保存。');
-    });
-    $(`#${APP_ID}-prompt-tabs`).addEventListener('click', (event) => {
-      const tab = event.target.closest('button[data-template-id]');
-      if (!tab) return;
-      const switched = switchPromptTemplate(tab.dataset.templateId);
-      if (!switched) return;
-      saveConfig(readPanelConfig());
-      generateReply({ auto: true, reason: 'prompt-switch' });
-    });
-    $(`#${APP_ID}-prompt-title`).addEventListener('input', () => {
-      syncPromptDraftFromPanel();
-      renderPromptTabs();
-    });
-    $(`#${APP_ID}-prompt`).addEventListener('input', syncPromptDraftFromPanel);
-    $(`#${APP_ID}-add-template`).addEventListener('click', addCustomPromptTemplate);
-    $(`#${APP_ID}-reset-template`).addEventListener('click', resetActiveBuiltinTemplate);
-    $(`#${APP_ID}-delete-template`).addEventListener('click', deleteActiveCustomTemplate);
-    $(`#${APP_ID}-generate`).addEventListener('click', generateReply);
-    $(`#${APP_ID}-reply-list`).addEventListener('click', async (event) => {
-      const button = event.target.closest('button[data-copy-reply-index]');
-      if (!button) return;
-      const index = Number.parseInt(button.dataset.copyReplyIndex, 10);
-      const text = getReplyTextByIndex(index);
-      if (!text) return setStatus('这一条候选回复为空，无法复制。', true);
-      setStatus((await copyToClipboard(text)) ? `已复制候选 ${index + 1}。` : '复制失败，请手动复制。');
-    });
-    $(`#${APP_ID}-copy`).addEventListener('click', async () => {
-      const replies = getCurrentReplyTexts();
-      const text = replies.length ? formatRepliesForCopy(replies) : state.lastReply;
-      if (!text) return setStatus('当前没有可复制的生成结果。', true);
-      setStatus((await copyToClipboard(text)) ? `已复制全部 ${replies.length || state.lastReplies.length} 条候选回复。` : '复制失败，请手动复制。');
-    });
-    watchTopicNavigation(maybeAutoGenerate);
+    }
+
+    const topic = collectTopic();
+    if (!topic) {
+      setStatus('idle', { error: '', result: null });
+      return;
+    }
+
+    const input = buildInputText(topic);
+    if (input.length < MIN_INPUT_LEN) {
+      setStatus('error', { error: '当前页面可读内容太少，无法生成回复。', topic: topic, input: input });
+      return;
+    }
+
+    const key = topic.key;
+    state.topic = topic;
+    state.input = input;
+    state.topicKey = key;
+    state.fromCache = false;
+    state.error = '';
+    inflightKey = key;
+    lastAutoAt = Date.now();
+    lastAutoTopicId = topic.topicId;
+
+    setStatus('loading', { result: null, elapsed: 0 });
+    startElapsedTimer();
+
+    try {
+      const result = await requestSayOne(input, config.tone);
+      if (inflightKey !== key) return;
+      const stamped = Object.assign({}, result, { __at: Date.now(), __input: input });
+      state.result = stamped;
+      state.elapsed = Date.now() - state.startedAt;
+      writeCache(key, { at: Date.now(), result: stamped, input: input, topicId: topic.topicId, title: topic.title });
+      stopElapsedTimer();
+      setStatus('ready', { fromCache: false });
+      if (state.panelOpen) renderPanel();
+    } catch (err) {
+      if (inflightKey !== key) return;
+      stopElapsedTimer();
+      setStatus('error', { error: (err && err.message) || '生成失败', result: null });
+    } finally {
+      if (inflightKey === key) inflightKey = '';
+      renderFab();
+    }
+  }
+
+  async function maybeAutoGenerate(options) {
+    const opts = options || {};
+    if (!isTopicPage()) return;
+    if (!config.auto && !opts.manual) return;
+
+    const parsed = parseTopicPath(location.pathname);
+    if (!parsed) return;
+
+    const key = buildTopicKey(parsed);
+    if (inflightKey && inflightKey === key) return;
+
+    // 冷却：同一帖子短时间内不重复自动请求
+    if (!opts.manual && lastAutoTopicId === parsed.topicId && Date.now() - lastAutoAt < AUTO_COOLDOWN) {
+      return;
+    }
+
+    const cached = readCache(key);
+    if (cached && !opts.force) {
+      state.topicKey = key;
+      state.input = cached.input || '';
+      state.result = cached.result;
+      state.elapsed = 0;
+      setStatus('ready', { fromCache: true });
+      return;
+    }
+
+    const ready = await waitForContent(CONTENT_WAIT_TIMEOUT);
+    if (!ready) {
+      setStatus('error', { error: '没有读到帖子内容，请刷新页面后重试。' });
+      return;
+    }
+
+    runGenerate({ manual: opts.manual });
+  }
+
+  /* ==========================================================================
+   * 11. 路由监听：Discourse 是 SPA，需要拦截 pushState / popstate
+   * ========================================================================== */
+
+  let lastHref = location.href;
+  let lastRouteId = '';
+
+  function currentRouteSignature() {
+    if (!isTopicPage()) return 'none';
+    const parsed = parseTopicPath(location.pathname);
+    return buildTopicKey(parsed);
+  }
+
+  /**
+   * 「是否需要重新生成」的判定依据：帖子 id + page 参数。
+   * Discourse 在帖子内跳锚点（点楼层、滚动）只会改末尾楼层号，
+   * 这时不应该重新花几十秒再生成一次。
+   */
+  function currentRouteId() {
+    if (!isTopicPage()) return 'none';
+    const parsed = parseTopicPath(location.pathname);
+    const page = new URLSearchParams(location.search).get('page') || '';
+    return parsed.topicId + '|' + page;
+  }
+
+  function handleRouteChange(source) {
+    if (location.href === lastHref && source !== 'force') return;
+    lastHref = location.href;
+
+    const routeId = currentRouteId();
+    if (routeId === lastRouteId) {
+      // 同一帖子同一页，只是锚点变化，保留已有结果
+      return;
+    }
+    lastRouteId = routeId;
+
+    const signature = currentRouteSignature();
+
+    if (!isTopicPage()) {
+      hideAll();
+      state.status = 'idle';
+      state.result = null;
+      state.error = '';
+      stopElapsedTimer();
+      togglePanel(false);
+      return;
+    }
+
+    showAll();
+    ensureRoot();
+    root.setAttribute('data-theme', detectTheme());
+
+    const cached = readCache(signature);
+    if (cached) {
+      state.topicKey = signature;
+      state.input = cached.input || '';
+      state.result = cached.result;
+      state.elapsed = 0;
+      setStatus('ready', { fromCache: true });
+      return;
+    }
+
+    setStatus('idle', { result: null, error: '', elapsed: 0, input: '' });
     maybeAutoGenerate();
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init, { once: true });
-  } else {
-    init();
+  function installRouter() {
+    const wrap = (name) => {
+      const original = history[name];
+      if (typeof original !== 'function') return;
+      history[name] = function patched() {
+        const ret = original.apply(this, arguments);
+        setTimeout(() => handleRouteChange(name), 0);
+        return ret;
+      };
+    };
+    wrap('pushState');
+    wrap('replaceState');
+
+    window.addEventListener('popstate', () => setTimeout(() => handleRouteChange('popstate'), 0));
+
+    // 兜底：轮询 URL，覆盖个别不经过 history 的跳转
+    setInterval(() => {
+      if (location.href !== lastHref) handleRouteChange('poll');
+    }, 800);
+
+    // Ember 渲染完成但 URL 未变时（例如从骨架屏变成真实楼层），补一次检测
+    const debouncedCheck = debounce(() => {
+      if (!isTopicPage()) return;
+      if (state.status !== 'idle') return;
+      if (inflightKey) return;
+      if (!config.auto) return;
+      if ($$('article[data-post-id]').length === 0) return;
+      maybeAutoGenerate();
+    }, 1500);
+
+    const observer = new MutationObserver(() => {
+      if (!isTopicPage()) return;
+      if (state.status !== 'idle') return;
+      debouncedCheck();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
+
+  /* ==========================================================================
+   * 12. 启动
+   * ========================================================================== */
+
+  function boot() {
+    loadCache();
+    ensureRoot();
+
+    if (!isTopicPage()) {
+      hideAll();
+      installRouter();
+      return;
+    }
+
+    showAll();
+    handleRouteChange('force');
+    installRouter();
+
+    // 首次进入做一次健康检查，失败时把原因写进面板
+    checkHealth().then((result) => {
+      state.health = result;
+      if (!result.ok && state.status === 'idle') {
+        setStatus('error', {
+          error:
+            '连不上「有一说一」服务（' +
+            normalizeApiBase(config.apiBase) +
+            '）。\n请确认服务已启动：在 reply-assistant 目录运行 python run_one.py。',
+        });
+      }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
+
+  // 便于调试
+  window.__LDYA__ = {
+    version: VERSION,
+    state: state,
+    config: () => config,
+    collect: collectTopic,
+    buildInput: () => (collectTopic() ? buildInputText(collectTopic()) : ''),
+    generate: () => runGenerate({ manual: true, force: true }),
+    open: () => togglePanel(true),
+  };
 })();
