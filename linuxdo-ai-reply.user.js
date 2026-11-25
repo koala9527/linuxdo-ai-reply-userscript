@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do 有一说一 · 回帖助手
 // @namespace    https://github.com/koala9527/linuxdo-ai-reply-userscript
-// @version      1.3.0
+// @version      1.3.1
 // @description  本地回帖文案助手与可调速浏览辅助；浏览速度 0–100，默认 10%，遇到限流、验证或页面隐藏即暂停，不保证账号安全或阅读数据增长。
 // @author       Hermes Agent
 // @match        https://linux.do/*
@@ -32,7 +32,7 @@
    * ========================================================================== */
 
   const APP = 'ldya';
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
 
   const STORE_KEY_CONFIG = APP + ':config';
   const STORE_KEY_CACHE = APP + ':cache';
@@ -49,9 +49,9 @@
     maxChars: 1900,
   };
 
-  // 基础节奏为 100% 速度；默认 10% 将操作等待时间延长十倍。
+  // 10% 是基础操作速度（1×），100% 是十倍速度（10×）；0% 暂停。
   const DEFAULT_BROWSE_CONFIG = {
-    speedPercent: 10,          // 0=暂停，100=基础速度，不超出基础操作速度
+    speedPercent: 10,          // 0=暂停，10=基础速度，100=十倍速度
     targetTopics: 12,          // 目标浏览话题数
     targetPosts: 45,           // 目标浏览帖子数
     maxPostsPerTopic: 6,       // 每个话题内细读楼层数 (3-12)
@@ -809,7 +809,7 @@
   }
 
   function scaleBrowseDelay(baseSeconds) {
-    return browseConfig.speedPercent === 0 ? Infinity : baseSeconds * 100 / browseConfig.speedPercent;
+    return browseConfig.speedPercent === 0 ? Infinity : baseSeconds * 10 / browseConfig.speedPercent;
   }
 
   function browseCanAdvance(token = browseRunId) {
@@ -828,10 +828,11 @@
   async function waitBrowseDelay(baseSeconds, label = '', token = browseRunId, onTick) {
     let remaining = Math.max(0, Number(baseSeconds) || 0);
     let last = Date.now();
+    let lastRender = -Infinity;
     while (browseState.running && token === browseRunId) {
       checkBrowseSafety();
       const now = Date.now();
-      if (browseCanAdvance(token)) remaining -= Math.max(0, now - last) / 1000 * browseConfig.speedPercent / 100;
+      if (browseCanAdvance(token)) remaining -= Math.max(0, now - last) / 1000 * browseConfig.speedPercent / 10;
       last = now;
       if (remaining <= 0 && browseCanAdvance(token)) return true;
       browseState.statusCountdown = Number.isFinite(scaleBrowseDelay(remaining)) ? Math.ceil(scaleBrowseDelay(remaining)) : 0;
@@ -839,9 +840,13 @@
         browseState.statusText = `${label} · ${browseConfig.speedPercent}% · 剩余 ${browseState.statusCountdown}s`;
       }
       if (onTick) onTick(browseState.statusCountdown);
-      renderHud();
-      if (state.panelOpen && state.activeTab === 'browse') renderBrowseStatus();
-      await sleep(250);
+      if (now - lastRender >= 250) {
+        renderHud();
+        if (state.panelOpen && state.activeTab === 'browse') renderBrowseStatus();
+        lastRender = now;
+      }
+      // Yield to the browser event loop; faster playback does not multiply UI refreshes.
+      await sleep(browseCanAdvance(token) ? Math.min(250, Math.max(25, scaleBrowseDelay(remaining) * 1000)) : 250);
     }
     return false;
   }
@@ -857,7 +862,7 @@
         if (!browseState.running || token !== browseRunId) { resolve(false); return; }
         checkBrowseSafety();
         if (browseCanAdvance(token)) {
-          elapsed += Math.max(0, now - last) * browseConfig.speedPercent / 100;
+          elapsed += Math.max(0, now - last) * browseConfig.speedPercent / 10;
           const progress = Math.min(1, elapsed / duration);
           const ease = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
           window.scrollTo(0, startY + distance * ease);
@@ -1876,7 +1881,7 @@
         <div class="ldya-field">
           <label for="ldya-browse-speed">浏览速度：<output id="ldya-speed-value">${browseConfig.speedPercent}%</output></label>
           <input id="ldya-browse-speed" class="ldya-input" data-bfield="speedPercent" type="range" min="0" max="100" step="1" value="${browseConfig.speedPercent}" />
-          <div class="ldya-hint">0% 暂停 · 默认 10%（基础等待时间 ×10）· 100% 基础速度；同时控制帖子滚动、停留、话题切换和阶段休息，当前等待即时调整。</div>
+          <div class="ldya-hint">0% 暂停 · 默认 10%＝基础速度（1×）· 100%＝十倍速度（10×）；同时控制帖子滚动、停留、话题切换和阶段休息。异步等待和逐帧滚动，不阻塞浏览器操作。</div>
         </div>
         <div class="ldya-field">
           <label>目标浏览话题数 (建议 8~25 篇/天)</label>
@@ -1891,14 +1896,14 @@
           <input class="ldya-input" data-bfield="maxPostsPerTopic" type="number" min="2" max="25" value="${browseConfig.maxPostsPerTopic}" />
         </div>
         <div class="ldya-field">
-          <label>单楼层基础停留时间范围 (100% 速度下，默认 6~15 秒)</label>
+          <label>单楼层基础停留时间范围 (10% 速度下，默认 6~15 秒)</label>
           <div style="display:flex; gap:8px;">
             <input class="ldya-input" data-bfield="minPostDwellSeconds" type="number" min="6" max="120" value="${browseConfig.minPostDwellSeconds}" placeholder="最少" />
             <input class="ldya-input" data-bfield="maxPostDwellSeconds" type="number" min="6" max="120" value="${browseConfig.maxPostDwellSeconds}" placeholder="最多" />
           </div>
         </div>
         <div class="ldya-field">
-          <label>换话题基础等待时间 (100% 速度下，至少 18 秒)</label>
+          <label>换话题基础等待时间 (10% 速度下，至少 18 秒)</label>
           <input class="ldya-input" data-bfield="cooldownSeconds" type="number" min="18" max="600" value="${browseConfig.cooldownSeconds}" />
         </div>
         <div class="ldya-field">

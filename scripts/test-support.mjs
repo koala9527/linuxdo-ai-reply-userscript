@@ -8,6 +8,7 @@ export function createHarness(scriptPath, saved = {}) {
   const timers = new Map();
   const values = new Map(Object.entries(saved));
   const listeners = new Map();
+  const renderTimes = [];
   const document = {
     readyState: 'loading', hidden: false, visibilityState: 'visible', title: 'Fixture',
     cookie: '', hasFocus: () => true,
@@ -31,6 +32,7 @@ export function createHarness(scriptPath, saved = {}) {
     window, document, location, console, Math: math, URL, URLSearchParams,
     Date: class extends Date { static now() { return now; } },
     performance: { now: () => now },
+    __testRender: (name) => renderTimes.push({ name, at: now }),
     GM_getValue: (key, fallback) => values.has(key) ? values.get(key) : fallback,
     GM_setValue: (key, value) => values.set(key, value),
     localStorage: { getItem: () => null, setItem() {} },
@@ -44,7 +46,8 @@ export function createHarness(scriptPath, saved = {}) {
   const marker = '  // 调试与外部脚本控制接口';
   if (!source.includes(marker)) throw new Error('Test instrumentation marker missing');
   source = source.replace(marker, `
-  renderHud = renderFab = renderPanel = renderBrowseStatus = showToast = () => {};
+  renderHud = () => __testRender('hud');
+  renderFab = renderPanel = renderBrowseStatus = showToast = () => {};
   waitForContent = async () => true;
   window.__LDYA_TEST__ = {
     DEFAULT_BROWSE_CONFIG, browseState, autoBrowse, riskDetector, saveBrowseConfig,
@@ -64,6 +67,7 @@ ${marker}`);
   const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
   return {
     api: window.__LDYA__, internals: window.__LDYA_TEST__, document, location, window, values, listeners,
+    renderTimes, scheduleInput: (ms, fn) => schedule(fn, ms, false),
     async advance(ms) {
       await flush();
       const until = now + ms;

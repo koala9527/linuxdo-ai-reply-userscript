@@ -5,7 +5,7 @@ import { createHarness } from './test-support.mjs';
 
 const source = process.env.LDYA_TEST_SOURCE || fileURLToPath(new URL('../linuxdo-ai-reply.user.js', import.meta.url));
 const harness = (saved) => createHarness(source, saved);
-function running(speed = 100) {
+function running(speed = 10) {
   const h = harness();
   h.internals.saveBrowseConfig({ speedPercent: speed });
   h.internals.browseState.running = true;
@@ -36,11 +36,11 @@ test('speed persists through reload; zero is not converted to default', () => {
   h.api.setBrowseSpeed(37);
   assert.equal(harness(Object.fromEntries(h.values)).api.browseConfig().speedPercent, 37);
 });
-test('100 / percentage scaling covers dwell, cooldown, and rest', () => {
+test('10 / percentage scaling: 10% baseline and 100% tenfold speed', () => {
   const h = harness();
   for (const speed of [1, 10, 50, 100]) {
     h.api.setBrowseSpeed(speed);
-    for (const seconds of [0.8, 11, 18, 90]) assert.equal(h.internals.scaleBrowseDelay(seconds), seconds * 100 / speed);
+    for (const seconds of [0.8, 11, 18, 90]) assert.equal(h.internals.scaleBrowseDelay(seconds), seconds * 10 / speed);
   }
   h.api.setBrowseSpeed(0);
   assert.equal(h.internals.scaleBrowseDelay(18), Infinity);
@@ -55,12 +55,12 @@ test('legacy synthetic activity settings are discarded and base minimums are enf
 test('UI slider specifies the full 0–100 range and default 10', () => {
   assert.match(harness().internals.renderBrowseTabHtml(), /data-bfield="speedPercent" type="range" min="0" max="100" step="1" value="10"/);
 });
-test('10% wait takes ten times the baseline work', async () => {
+test('10% wait matches the baseline duration', async () => {
   const h = running(10);
   let done = false;
   const work = h.internals.waitBrowseDelay(1).then((ok) => { done = ok; });
-  await h.advance(9750); assert.equal(done, false);
-  await h.advance(500); await work; assert.equal(done, true);
+  await h.advance(750); assert.equal(done, false);
+  await h.advance(250); await work; assert.equal(done, true);
 });
 test('changing speed updates an in-progress wait without restarting it', async () => {
   const h = running(10);
@@ -68,18 +68,18 @@ test('changing speed updates an in-progress wait without restarting it', async (
   const work = h.internals.waitBrowseDelay(2).then((ok) => { done = ok; });
   await h.advance(1000);
   h.api.setBrowseSpeed(100);
-  await h.advance(1750); assert.equal(done, false);
+  await h.advance(200); assert.equal(done, false);
   await h.advance(250); await work; assert.equal(done, true);
 });
 test('speed zero freezes work, switching to nonzero resumes speed pause', async () => {
-  const h = running(100);
+  const h = running(10);
   h.internals.autoBrowse.step = () => Promise.resolve();
   let done = false;
   const work = h.internals.waitBrowseDelay(2).then((ok) => { done = ok; });
   await h.advance(500); h.api.setBrowseSpeed(0);
   await h.advance(10000);
   assert.equal(done, false); assert.equal(h.api.browseState.pauseReason, 'speed');
-  h.api.setBrowseSpeed(100);
+  h.api.setBrowseSpeed(10);
   await h.advance(1500); await work; assert.equal(done, true);
 });
 test('manual pause is not undone by changing speed', async () => {
@@ -123,20 +123,50 @@ test('challenge element pauses movement and never solves verification', async ()
   h.api.stopBrowse(); await h.advance(20); assert.equal(await work, false);
 });
 test('smooth scrolling respects speed and zero pause', async () => {
-  const h = running(10);
+  const h = running(1);
   const work = h.internals.smoothBrowseScrollTo(1000, 800);
   await h.advance(800); assert.ok(h.window.scrollY < 1000);
   h.api.setBrowseSpeed(0); const previous = h.window.scrollY;
   await h.advance(3000); assert.equal(h.window.scrollY, previous);
   h.api.stopBrowse(); await h.advance(20); assert.equal(await work, false);
 });
+for (const [speed, milliseconds] of [[10, 1500], [50, 300], [100, 150]]) {
+  test(`asynchronous delay at ${speed}% takes ${milliseconds}ms for 1.5 baseline seconds`, async () => {
+    const h = running(speed); let done = false;
+    const work = h.internals.waitBrowseDelay(1.5).then((ok) => { done = ok; });
+    await h.advance(milliseconds - 1); assert.equal(done, false);
+    await h.advance(1); await work; assert.equal(done, true);
+  });
+}
+for (const [speed, milliseconds] of [[10, 800], [100, 80]]) {
+  test(`requestAnimationFrame scroll at ${speed}% uses ${milliseconds}ms baseline scaling`, async () => {
+    const h = running(speed); let done = false;
+    const work = h.internals.smoothBrowseScrollTo(1000, 800).then((ok) => { done = ok; });
+    await h.advance(milliseconds - 16); assert.equal(done, false);
+    await h.advance(16); await work; assert.equal(done, true);
+    assert.equal(h.window.scrollY, 1000);
+  });
+}
+test('100% playback yields to unrelated input callbacks and caps HUD refresh frequency', async () => {
+  const h = running(100); let callbacks = 0;
+  h.renderTimes.length = 0;
+  const work = h.internals.waitBrowseDelay(10);
+  h.scheduleInput(100, () => { callbacks++; });
+  h.scheduleInput(500, () => { callbacks++; });
+  await h.advance(100); assert.equal(callbacks, 1);
+  await h.advance(400); assert.equal(callbacks, 2);
+  await h.advance(500); assert.equal(await work, true);
+  const rendered = h.renderTimes.filter((entry) => entry.name === 'hud');
+  assert.ok(rendered.length <= 4);
+  for (let i = 1; i < rendered.length; i++) assert.ok(rendered[i].at - rendered[i - 1].at >= 250);
+});
 test('list discovery and navigation both respect 10% speed', async () => {
   const h = running(10);
   let clicks = 0;
   h.document.querySelectorAll = () => [link('/t/fixture/123', () => clicks++)];
   const work = h.internals.autoBrowse.findAndEnterNextTopic();
-  await h.advance(24750); assert.equal(clicks, 0);
-  await h.advance(500); await work; assert.equal(clicks, 1);
+  await h.advance(2250); assert.equal(clicks, 0);
+  await h.advance(250); await work; assert.equal(clicks, 1);
 });
 test('speed-zero task does not navigate or increment counters', async () => {
   const h = harness(); let clicks = 0;
@@ -158,24 +188,24 @@ test('only same-origin HTTPS topic links are navigable', () => {
 test('topic cooldown is scaled before selecting the next topic', async () => {
   const h = running(10); h.api.browseState.completedTopics = 1;
   const work = h.internals.autoBrowse.handleTopicFinished();
-  await h.advance(179750); assert.equal(h.location.href, 'https://linux.do/latest');
-  await h.advance(500); await work; assert.equal(h.location.href, '/latest');
+  await h.advance(17750); assert.equal(h.location.href, 'https://linux.do/latest');
+  await h.advance(250); await work; assert.equal(h.location.href, '/latest');
 });
 test('periodic rest is also scaled at default 10%', async () => {
   const h = running(10); h.api.browseState.completedTopics = 5;
   const work = h.internals.autoBrowse.handleTopicFinished();
-  await h.advance(899750); assert.equal(h.location.href, 'https://linux.do/latest');
-  await h.advance(500); await work; assert.equal(h.location.href, '/latest');
+  await h.advance(89750); assert.equal(h.location.href, 'https://linux.do/latest');
+  await h.advance(250); await work; assert.equal(h.location.href, '/latest');
 });
 test('route change invalidates old page work before navigation or counters can advance', async () => {
-  const h = running(100);
+  const h = running(10);
   const work = h.internals.waitBrowseDelay(1);
   await h.advance(500); h.internals.autoBrowse.onRouteChange();
   await h.advance(250); assert.equal(await work, false);
   assert.equal(h.api.browseState.completedPosts, 0);
 });
 test('pause/resume keeps a single reader and counts the post once', async () => {
-  const h = harness(); h.api.setBrowseSpeed(100);
+  const h = harness(); h.api.setBrowseSpeed(10);
   h.location.pathname = '/t/fixture/123'; h.location.href = 'https://linux.do/t/fixture/123';
   h.document.querySelectorAll = (selector) => selector === 'article[data-post-id]' ? [article()] : [];
   h.internals.saveBrowseConfig({ maxPostsPerTopic: 1, targetTopics: 1 });
@@ -188,7 +218,7 @@ test('pause/resume keeps a single reader and counts the post once', async () => 
   assert.equal(h.api.browseState.completedTopics, 1); assert.equal(h.api.browseState.completedPosts, 1);
 });
 test('stop prevents late post counts after the reading delay', async () => {
-  const h = harness(); h.api.setBrowseSpeed(100);
+  const h = harness(); h.api.setBrowseSpeed(10);
   h.location.pathname = '/t/fixture/123';
   h.document.querySelectorAll = (selector) => selector === 'article[data-post-id]' ? [article()] : [];
   const work = h.api.startBrowse(); await h.advance(1000);

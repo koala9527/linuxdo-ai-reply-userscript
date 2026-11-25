@@ -90,14 +90,14 @@ export const OBSERVE_PAGE = `(() => {
 export function controlScript(options) {
   return `(async () => {
     if (!(${isLinuxDoUrl.toString()})(location.href)) throw new Error('页面不属于 Linux.do');
-    if (!document.querySelector('#ldya-root')) throw new Error('请先在此标签页安装或更新油猴脚本至 v1.3.0');
+    if (!document.querySelector('#ldya-root')) throw new Error('请先在此标签页安装或更新油猴脚本至 v1.3.1');
     let panel = document.querySelector('#ldya-panel');
     if (!panel || panel.style.display !== 'flex') document.querySelector('#ldya-root .ldya-fab')?.click();
     panel = document.querySelector('#ldya-panel');
     if (!panel) throw new Error('未找到脚本面板');
     panel.querySelector('[data-tab="browse"]')?.click();
     const input = panel.querySelector('[data-bfield="speedPercent"]');
-    if (!input) throw new Error('未找到速度滑块，请更新脚本至 v1.3.0');
+    if (!input) throw new Error('未找到速度滑块，请更新脚本至 v1.3.1');
     ${options.browse || options.speedExplicit ? `input.value = ${JSON.stringify(options.speed)};
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));` : ''}
@@ -134,7 +134,7 @@ export async function main(args) {
     console.log(`Chrome 浏览辅助（Node 22+）
   --status / --detect-risk  只读页面信号，不判断是否会封号
   --browse [--speed=10]     通过已安装的油猴脚本启动任务
-  --speed=0..100            调整当前任务；0=暂停，默认10，100=基础速度
+  --speed=0..100            调整当前任务；0=暂停，默认10=基础速度，100=十倍速度
   --pause / --stop          暂停或结束已有任务
   --start-chrome --profile=ABSOLUTE_PATH  启动专用调试配置（须手动登录）
 必须已有本机9222调试连接和Linux.do标签页；仅登录普通Chrome不足以启用CDP。`); return;
