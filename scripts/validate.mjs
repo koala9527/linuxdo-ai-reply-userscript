@@ -1,6 +1,8 @@
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const scriptPath = new URL('../linuxdo-ai-reply.user.js', import.meta.url);
+const scriptPath = fileURLToPath(new URL('../linuxdo-ai-reply.user.js', import.meta.url));
 const source = fs.readFileSync(scriptPath, 'utf8');
 
 const requiredHeaders = [
@@ -50,6 +52,21 @@ const requiredSnippets = [
   'function runGenerate(options)',
   'function maybeAutoGenerate(options)',
   'function waitForContent(timeout)',
+  // 可调速浏览辅助
+  'DEFAULT_BROWSE_CONFIG',
+  'const autoBrowse =',
+  'smoothBrowseScrollTo(targetY, durationMs',
+  'speedPercent: 10',
+  'normalizeBrowseSpeed(value)',
+  'scaleBrowseDelay(baseSeconds)',
+  'waitBrowseDelay(baseSeconds',
+  'data-bfield="speedPercent"',
+  'setBrowseSpeed:',
+  'calculatePostDwell(text)',
+  'ldya-hud',
+  // 前端风控与监控探测
+  'const riskDetector =',
+  '/topics/timings',
 ];
 
 const missing = [];
@@ -58,7 +75,7 @@ for (const item of [...requiredHeaders, ...requiredSnippets]) {
 }
 
 // 旧版本遗留的直接调用 OpenAI 兼容接口 / 提示词模板逻辑必须彻底移除
-const forbidden = ['/chat/completions', '===AI_REPLY_', 'BUILTIN_PROMPT_TEMPLATES', 'Authorization: `Bearer'];
+const forbidden = ['/chat/completions', '===AI_REPLY_', 'BUILTIN_PROMPT_TEMPLATES', 'Authorization: `Bearer', 'simulateMicroActivity', "new MouseEvent('mousemove'", "new PointerEvent('pointermove'"];
 const leftovers = forbidden.filter((item) => source.includes(item));
 
 if (missing.length || leftovers.length) {
@@ -73,5 +90,21 @@ if (missing.length || leftovers.length) {
   process.exit(1);
 }
 
-console.log('校验通过：' + scriptPath.pathname);
+// 检查 chrome-controller.mjs 控制脚本
+const controllerPath = fileURLToPath(new URL('./chrome-controller.mjs', import.meta.url));
+if (!fs.existsSync(controllerPath)) {
+  console.error('缺少 Chrome CDP 控制脚本: ' + controllerPath);
+  process.exit(1);
+}
+
+try {
+  execFileSync(process.execPath, ['--check', scriptPath]);
+  execFileSync(process.execPath, ['--check', controllerPath]);
+} catch (err) {
+  console.error('chrome-controller.mjs 语法检查失败: ' + err.message);
+  process.exit(1);
+}
+
+console.log('油猴脚本校验通过：' + scriptPath);
 console.log('文件大小：' + (source.length / 1024).toFixed(1) + ' KB');
+console.log('Chrome 控制器校验通过：' + controllerPath);

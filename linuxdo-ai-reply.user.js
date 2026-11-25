@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Linux.do 有一说一 · 回帖助手
 // @namespace    https://github.com/koala9527/linuxdo-ai-reply-userscript
-// @version      1.0.0
-// @description  在 linux.do 帖子页自动把「标题 + 本页内容」交给本地「有一说一」服务，生成一条可直接复制的回复；有结果时右下角按钮变色。
+// @version      1.3.0
+// @description  本地回帖文案助手与可调速浏览辅助；浏览速度 0–100，默认 10%，遇到限流、验证或页面隐藏即暂停，不保证账号安全或阅读数据增长。
 // @author       Hermes Agent
 // @match        https://linux.do/*
 // @match        https://www.linux.do/*
@@ -23,7 +23,7 @@
 (function () {
   'use strict';
 
-  // 防止脚本被重复注入（重复注入会出现两个悬浮按钮）
+  // 防止脚本被重复注入
   if (window.__LDYA_LOADED__) return;
   window.__LDYA_LOADED__ = true;
 
@@ -32,20 +32,37 @@
    * ========================================================================== */
 
   const APP = 'ldya';
-  const VERSION = '1.0.0';
+  const VERSION = '1.3.0';
 
   const STORE_KEY_CONFIG = APP + ':config';
   const STORE_KEY_CACHE = APP + ':cache';
+  const STORE_KEY_BROWSE_CONFIG = APP + ':browse:config';
+  const STORE_KEY_BROWSE_STATE = APP + ':browse:state';
+  const STORE_KEY_BROWSE_HISTORY = APP + ':browse:history';
+  const STORE_KEY_ACTIVE_TAB = APP + ':ui:tab';
 
+  // 有一说一回复助手默认配置
   const DEFAULT_CONFIG = {
-    // 有一说一服务地址（本地默认 8011）
     apiBase: 'http://127.0.0.1:8011',
-    // 语气：direct 直接 / calm 平和 / sharp 犀利
     tone: 'direct',
-    // 进入帖子页后是否自动请求
     auto: true,
-    // 发送给服务的内容上限（接口硬上限 2000）
     maxChars: 1900,
+  };
+
+  // 基础节奏为 100% 速度；默认 10% 将操作等待时间延长十倍。
+  const DEFAULT_BROWSE_CONFIG = {
+    speedPercent: 10,          // 0=暂停，100=基础速度，不超出基础操作速度
+    targetTopics: 12,          // 目标浏览话题数
+    targetPosts: 45,           // 目标浏览帖子数
+    maxPostsPerTopic: 6,       // 每个话题内细读楼层数 (3-12)
+    minPostDwellSeconds: 6,    // 单楼最少细读时间 (秒)
+    maxPostDwellSeconds: 15,   // 单楼最多细读时间 (秒)
+    charsPerSecond: 20,        // 字符/秒加权（长楼层自动增加阅读时间）
+    cooldownSeconds: 18,       // 话题切换冷却等待 (秒，建议 15-30)
+    fatigueInterval: 5,        // 每浏览 N 个话题后触发一次疲劳休整
+    fatigueRestSeconds: 90,    // 疲劳休整等待时间 (秒)
+    sourceList: 'latest',      // 话题来源: latest (最新) | unread (未读) | new (新帖) | top (热门)
+    autoResume: true,          // 仅在启动任务的同一标签页内跨页面继续
   };
 
   const TONE_OPTIONS = [
@@ -54,12 +71,12 @@
     { id: 'sharp', label: '犀利' },
   ];
 
-  const REQUEST_TIMEOUT = 180000; // 单次生成通常 35-70 秒，留足余量
+  const REQUEST_TIMEOUT = 180000;
   const MIN_INPUT_LEN = 8;
   const MAX_INPUT_LEN = 2000;
   const CACHE_LIMIT = 30;
   const CACHE_TTL = 24 * 60 * 60 * 1000;
-  const AUTO_COOLDOWN = 20000; // 同一帖子 20 秒内不重复自动请求
+  const AUTO_COOLDOWN = 20000;
   const CONTENT_WAIT_TIMEOUT = 12000;
 
   /* ==========================================================================
@@ -70,13 +87,15 @@
     get(key, fallback) {
       try {
         const raw = typeof GM_getValue === 'function' ? GM_getValue(key, null) : null;
-        if (raw === null || raw === undefined) return fallback;
-        if (typeof raw === 'string') {
-          try {
-            return JSON.parse(raw);
-          } catch (_) {
-            return raw;
+        if (raw === null || raw === undefined) {
+          const local = localStorage.getItem(key);
+          if (local !== null && local !== undefined) {
+            try { return JSON.parse(local); } catch (_) { return local; }
           }
+          return fallback;
+        }
+        if (typeof raw === 'string') {
+          try { return JSON.parse(raw); } catch (_) { return raw; }
         }
         return raw;
       } catch (_) {
@@ -86,17 +105,60 @@
     set(key, value) {
       try {
         if (typeof GM_setValue === 'function') GM_setValue(key, JSON.stringify(value));
-      } catch (_) {
-        /* 存储失败不影响主流程 */
-      }
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+      } catch (_) {}
     },
   };
 
   let config = Object.assign({}, DEFAULT_CONFIG, store.get(STORE_KEY_CONFIG, {}) || {});
+  function normalizeBrowseSpeed(value) {
+    if (value === null || value === undefined || String(value).trim() === '') return 10;
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.min(100, Math.max(0, Math.round(number))) : 10;
+  }
+
+  function normalizeBrowseConfig(value) {
+    const result = Object.assign({}, DEFAULT_BROWSE_CONFIG);
+    const input = value && typeof value === 'object' ? value : {};
+    const ranges = {
+      targetTopics: [1, 100], targetPosts: [1, 300], maxPostsPerTopic: [1, 25],
+      minPostDwellSeconds: [6, 120], maxPostDwellSeconds: [6, 120],
+      charsPerSecond: [10, 100], cooldownSeconds: [18, 600],
+      fatigueInterval: [1, 20], fatigueRestSeconds: [90, 1800],
+    };
+    for (const [key, [min, max]] of Object.entries(ranges)) {
+      const number = Number(input[key]);
+      if (input[key] !== null && input[key] !== '' && Number.isFinite(number)) {
+        result[key] = Math.min(max, Math.max(min, Math.round(number)));
+      }
+    }
+    result.maxPostDwellSeconds = Math.max(result.minPostDwellSeconds, result.maxPostDwellSeconds);
+    result.speedPercent = normalizeBrowseSpeed(input.speedPercent);
+    if (['latest', 'unread', 'new', 'top'].includes(input.sourceList)) result.sourceList = input.sourceList;
+    result.autoResume = input.autoResume !== false;
+    return result;
+  }
+
+  let browseConfig = normalizeBrowseConfig(store.get(STORE_KEY_BROWSE_CONFIG, {}));
 
   function saveConfig(patch) {
     config = Object.assign({}, config, patch || {});
     store.set(STORE_KEY_CONFIG, config);
+  }
+
+  function saveBrowseConfig(patch) {
+    browseConfig = normalizeBrowseConfig(Object.assign({}, browseConfig, patch || {}));
+    store.set(STORE_KEY_BROWSE_CONFIG, browseConfig);
+    if (browseState.running && browseConfig.speedPercent === 0 && !browseState.paused) {
+      autoBrowse.suspend('speed', '速度为 0%，浏览已暂停');
+    } else if (browseState.running && browseState.pauseReason === 'speed' && browseConfig.speedPercent > 0) {
+      browseState.paused = false;
+      browseState.pauseReason = '';
+      browseState.status = 'reading';
+      persistBrowseState();
+      autoBrowse.step();
+    }
+    renderHud();
   }
 
   function normalizeApiBase(value) {
@@ -170,6 +232,10 @@
   }
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function randomRange(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
 
   function debounce(fn, wait) {
     let timer = 0;
@@ -488,11 +554,12 @@
   }
 
   /* ==========================================================================
-   * 7. 运行状态
+   * 7. 运行状态与 Tab 切换
    * ========================================================================== */
 
   const state = {
     status: 'idle', // idle | loading | ready | error
+    activeTab: store.get(STORE_KEY_ACTIVE_TAB, 'reply'), // 'reply' | 'browse' | 'monitor'
     topicKey: '',
     topic: null,
     input: '',
@@ -524,7 +591,7 @@
     elapsedTimer = setInterval(() => {
       state.elapsed = Date.now() - state.startedAt;
       renderFab();
-      if (state.panelOpen) renderPanelStatus();
+      if (state.panelOpen && state.activeTab === 'reply') renderPanelStatus();
     }, 500);
   }
 
@@ -536,7 +603,435 @@
   }
 
   /* ==========================================================================
-   * 8. 样式
+   * 8. 前端风控与监控探测模块 (Risk & Telemetry Detector)
+   * ========================================================================== */
+
+  const riskDetector = {
+    data: {
+      timingRequests: [],
+      lastTiming: null,
+      timingsSuccessCount: 0,
+      timingsErrorCount: 0,
+      cfDetected: false,
+      trackersDetected: [],
+      visibilityChanges: 0,
+      lastVisibilityState: 'visible',
+      hiddenSince: 0,
+    },
+
+    init() {
+      this.data.lastVisibilityState = document.visibilityState;
+      document.addEventListener('visibilitychange', () => {
+        this.data.lastVisibilityState = document.visibilityState;
+        this.data.visibilityChanges++;
+        if (document.hidden) {
+          this.data.hiddenSince = Date.now();
+          autoBrowse.suspend('hidden', '页面已隐藏，浏览已暂停；返回后请手动恢复');
+        } else {
+          this.data.hiddenSince = 0;
+        }
+        renderHud();
+        if (state.panelOpen && state.activeTab === 'monitor') renderPanel();
+      });
+
+      this.hookNetwork();
+      this.scanPage();
+    },
+
+    hookNetwork() {
+      try {
+        const origFetch = window.fetch;
+        if (typeof origFetch === 'function') {
+          window.fetch = function (resource, init) {
+            const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+            const isTiming = typeof url === 'string' && url.includes('/topics/timings');
+            const startTime = Date.now();
+            const promise = origFetch.apply(this, arguments);
+            if (isTiming) {
+              promise
+                .then((res) => {
+                  riskDetector.recordTiming(res.status, Date.now() - startTime);
+                })
+                .catch(() => {
+                  riskDetector.recordTiming(0, Date.now() - startTime);
+                });
+            }
+            return promise;
+          };
+        }
+
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function (method, url) {
+          this.__ldya_isTiming = typeof url === 'string' && url.includes('/topics/timings');
+          this.__ldya_startTime = Date.now();
+          return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function () {
+          if (this.__ldya_isTiming) {
+            this.addEventListener('loadend', () => {
+              riskDetector.recordTiming(this.status, Date.now() - (this.__ldya_startTime || Date.now()));
+            });
+          }
+          return origSend.apply(this, arguments);
+        };
+      } catch (err) {
+        console.warn('[有一说一] 网络监控挂钩提示:', err);
+      }
+    },
+
+    recordTiming(status, duration) {
+      const entry = {
+        time: Date.now(),
+        status: status,
+        duration: duration,
+      };
+      this.data.lastTiming = entry;
+      this.data.timingRequests.unshift(entry);
+      if (this.data.timingRequests.length > 20) this.data.timingRequests.pop();
+      if (status >= 200 && status < 300) {
+        this.data.timingsSuccessCount++;
+      } else {
+        this.data.timingsErrorCount++;
+      }
+      if (status === 429 || status === 403) {
+        autoBrowse.suspend('limit', `收到 HTTP ${status}，浏览已暂停；请检查网站提示后手动恢复`);
+      }
+      if (state.panelOpen && state.activeTab === 'monitor') renderPanel();
+    },
+
+    scanPage() {
+      const hasCfDom = !!document.querySelector(
+        '.cf-turnstile, #challenge-stage, #cf-wrapper, iframe[src*="challenges.cloudflare.com"]'
+      );
+      this.data.cfDetected = hasCfDom;
+
+      const trackers = [];
+      if (window.Sentry || window.__SENTRY__) trackers.push('Sentry 异常监控');
+      if (window.dataLayer || window.gtag) trackers.push('Google Analytics');
+      if (document.querySelector('script[src*="cloudflareinsights"], script[src*="cdn-cgi/rum"]')) {
+        trackers.push('Cloudflare Web Analytics');
+      }
+      if (window.umami) trackers.push('Umami');
+      this.data.trackersDetected = trackers;
+    },
+
+    getReport() {
+      this.scanPage();
+      const isHidden = document.hidden;
+      const hasFocus = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+      const recentTiming = this.data.lastTiming;
+      const timingOk = !recentTiming || (recentTiming.status >= 200 && recentTiming.status < 300);
+
+      let safetyLevel = '未知';
+      let safetySummary = '仅观察页面信号，无法判断账号风险或后台规则';
+      const issues = [];
+
+      if (isHidden) {
+        safetyLevel = 'B';
+        safetySummary = '阅读计时已暂停（页面处于后台）';
+        issues.push(
+          '当前标签页处于后台/隐藏状态。Discourse 的 screen-track.js 在页面不可见时会自动停止累计阅读时间。建议保持窗口前台或分屏可见。'
+        );
+      }
+
+      if (this.data.cfDetected) {
+        safetyLevel = 'Warning';
+        safetySummary = '检测到 Cloudflare 人机挑战';
+        issues.push('页面出现 Cloudflare 验证码挑战，请手动在浏览器中点击通过验证。');
+      }
+
+      if (recentTiming && recentTiming.status === 429) {
+        safetyLevel = 'Warning';
+        safetySummary = '触发服务器限频 (HTTP 429)';
+        issues.push('观察到 HTTP 429，浏览任务已暂停，不会自动重试。请检查网站提示并遵守站点限制。');
+      }
+
+      return {
+        safetyLevel,
+        safetySummary,
+        isHidden,
+        hasFocus,
+        timingOk,
+        recentTiming,
+        issues,
+        trackers: this.data.trackersDetected,
+        challengeDetected: this.data.cfDetected,
+        successCount: this.data.timingsSuccessCount,
+        errorCount: this.data.timingsErrorCount,
+      };
+    },
+  };
+
+  /* ==========================================================================
+   * 9. 可调速浏览辅助引擎
+   * ========================================================================== */
+
+  const browseState = {
+    running: false, paused: false, pauseReason: '',
+    completedTopics: 0, completedPosts: 0, currentTopicPostsRead: 0,
+    currentFloor: 1, status: 'idle', statusText: '待命', statusCountdown: 0,
+    startedAt: 0, currentTopicId: null, readPostKeys: [],
+    history: (() => { const value = store.get(STORE_KEY_BROWSE_HISTORY, []); return Array.isArray(value) ? value.filter((id) => typeof id === 'string') : []; })(),
+  };
+  let browseRunId = 0;
+  let activeBrowseStep = null;
+
+  function loadBrowseState() {
+    // Session storage scopes a running task to its original tab, not every logged-in tab.
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(STORE_KEY_BROWSE_STATE) || 'null');
+      if (!saved || !saved.running || !browseConfig.autoResume) return;
+      for (const key of ['completedTopics', 'completedPosts', 'currentTopicPostsRead', 'startedAt', 'currentFloor']) {
+        if (Number.isFinite(saved[key]) && saved[key] >= 0) browseState[key] = saved[key];
+      }
+      browseState.currentTopicId = typeof saved.currentTopicId === 'string' ? saved.currentTopicId : null;
+      browseState.readPostKeys = Array.isArray(saved.readPostKeys) ? saved.readPostKeys.filter((key) => typeof key === 'string') : [];
+      browseState.running = true;
+      browseState.paused = !!saved.paused || browseConfig.speedPercent === 0;
+      browseState.pauseReason = saved.paused ? String(saved.pauseReason || 'manual') : browseConfig.speedPercent === 0 ? 'speed' : '';
+      browseState.status = browseState.paused ? 'paused' : 'reading';
+      browseState.statusText = browseState.paused ? '浏览任务已暂停，需手动恢复' : '正在恢复本标签页的浏览任务';
+    } catch (_) {}
+  }
+
+  function persistBrowseState() {
+    try {
+      sessionStorage.setItem(STORE_KEY_BROWSE_STATE, JSON.stringify({
+        running: browseState.running, paused: browseState.paused, pauseReason: browseState.pauseReason,
+        completedTopics: browseState.completedTopics, completedPosts: browseState.completedPosts,
+        currentTopicPostsRead: browseState.currentTopicPostsRead, currentFloor: browseState.currentFloor,
+        currentTopicId: browseState.currentTopicId, readPostKeys: browseState.readPostKeys,
+        startedAt: browseState.startedAt,
+      }));
+    } catch (_) {}
+    store.set(STORE_KEY_BROWSE_HISTORY, browseState.history.slice(-300));
+  }
+
+  function scaleBrowseDelay(baseSeconds) {
+    return browseConfig.speedPercent === 0 ? Infinity : baseSeconds * 100 / browseConfig.speedPercent;
+  }
+
+  function browseCanAdvance(token = browseRunId) {
+    return browseState.running && token === browseRunId && !browseState.paused &&
+      browseConfig.speedPercent > 0 && !document.hidden && !riskDetector.data.cfDetected;
+  }
+
+  function checkBrowseSafety() {
+    riskDetector.scanPage();
+    if (document.hidden) autoBrowse.suspend('hidden', '页面已隐藏，浏览已暂停；返回后请手动恢复');
+    else if (riskDetector.data.cfDetected) autoBrowse.suspend('challenge', '页面出现验证，浏览已暂停；请手动处理');
+    else if (browseConfig.speedPercent === 0 && !browseState.paused) autoBrowse.suspend('speed', '速度为 0%，浏览已暂停');
+  }
+
+  // Consume baseline work at the live selected rate. Paused time never accrues.
+  async function waitBrowseDelay(baseSeconds, label = '', token = browseRunId, onTick) {
+    let remaining = Math.max(0, Number(baseSeconds) || 0);
+    let last = Date.now();
+    while (browseState.running && token === browseRunId) {
+      checkBrowseSafety();
+      const now = Date.now();
+      if (browseCanAdvance(token)) remaining -= Math.max(0, now - last) / 1000 * browseConfig.speedPercent / 100;
+      last = now;
+      if (remaining <= 0 && browseCanAdvance(token)) return true;
+      browseState.statusCountdown = Number.isFinite(scaleBrowseDelay(remaining)) ? Math.ceil(scaleBrowseDelay(remaining)) : 0;
+      if (!browseState.paused && label) {
+        browseState.statusText = `${label} · ${browseConfig.speedPercent}% · 剩余 ${browseState.statusCountdown}s`;
+      }
+      if (onTick) onTick(browseState.statusCountdown);
+      renderHud();
+      if (state.panelOpen && state.activeTab === 'browse') renderBrowseStatus();
+      await sleep(250);
+    }
+    return false;
+  }
+
+  function smoothBrowseScrollTo(targetY, durationMs, token = browseRunId) {
+    return new Promise((resolve) => {
+      const startY = window.scrollY || window.pageYOffset || 0;
+      const distance = targetY - startY;
+      const duration = Math.max(400, durationMs || Math.abs(distance));
+      let elapsed = 0;
+      let last = performance.now();
+      function frame(now) {
+        if (!browseState.running || token !== browseRunId) { resolve(false); return; }
+        checkBrowseSafety();
+        if (browseCanAdvance(token)) {
+          elapsed += Math.max(0, now - last) * browseConfig.speedPercent / 100;
+          const progress = Math.min(1, elapsed / duration);
+          const ease = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+          window.scrollTo(0, startY + distance * ease);
+          if (progress >= 1) { resolve(true); return; }
+        }
+        last = now;
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    });
+  }
+
+  function calculatePostDwell(text) {
+    const base = randomRange(browseConfig.minPostDwellSeconds, browseConfig.maxPostDwellSeconds);
+    const extra = Math.min(10, Math.floor(String(text || '').length / browseConfig.charsPerSecond));
+    return Math.max(6, base + extra);
+  }
+
+  function startCountdown(seconds, onTick, onComplete) {
+    return waitBrowseDelay(seconds, '', browseRunId, onTick).then((ok) => { if (ok) onComplete(); });
+  }
+
+  function topicLink(link) {
+    try {
+      const url = new URL(link.getAttribute('href') || link.href, location.href);
+      if (url.protocol !== 'https:' || url.origin !== location.origin) return null;
+      const parsed = parseTopicPath(url.pathname);
+      return parsed ? { url, topicId: parsed.topicId, el: link } : null;
+    } catch (_) { return null; }
+  }
+
+  const autoBrowse = {
+    start() {
+      if (browseState.running) return this.step();
+      browseRunId++;
+      activeBrowseStep = null;
+      Object.assign(browseState, {
+        running: true, paused: browseConfig.speedPercent === 0,
+        pauseReason: browseConfig.speedPercent === 0 ? 'speed' : '',
+        startedAt: Date.now(), completedTopics: 0, completedPosts: 0,
+        currentTopicId: null, currentTopicPostsRead: 0, readPostKeys: [],
+        status: browseConfig.speedPercent === 0 ? 'paused' : 'reading',
+        statusText: browseConfig.speedPercent === 0 ? '速度为 0%，浏览已暂停' : '浏览辅助已启动',
+      });
+      checkBrowseSafety();
+      persistBrowseState();
+      renderHud(); renderFab();
+      if (state.panelOpen) renderPanel();
+      return this.step();
+    },
+
+    suspend(reason, text) {
+      if (!browseState.running || (browseState.paused && browseState.pauseReason === reason)) return;
+      browseState.paused = true;
+      browseState.pauseReason = reason;
+      browseState.status = 'paused';
+      browseState.statusText = text;
+      persistBrowseState(); renderHud(); renderFab();
+      if (state.panelOpen) renderPanel();
+    },
+
+    pause() {
+      if (!browseState.running) return;
+      if (!browseState.paused) { this.suspend('manual', '任务已手动暂停'); return; }
+      riskDetector.scanPage();
+      if (browseConfig.speedPercent === 0 || document.hidden || riskDetector.data.cfDetected) {
+        showToast('请先设置非零速度，并确保页面可见且验证已处理'); return;
+      }
+      browseState.paused = false; browseState.pauseReason = '';
+      browseState.status = 'reading'; browseState.statusText = '任务已恢复';
+      persistBrowseState(); renderHud(); renderFab();
+      if (state.panelOpen) renderPanel();
+      return this.step();
+    },
+
+    stop(reason) {
+      browseRunId++;
+      activeBrowseStep = null;
+      browseState.running = false; browseState.paused = false; browseState.pauseReason = '';
+      browseState.status = 'done'; browseState.statusCountdown = 0;
+      browseState.statusText = reason === 'target_met' ? '已达到本地浏览上限' : reason === 'no_topics' ? '没有新的可浏览话题，任务已结束' : '任务已停止';
+      persistBrowseState(); renderHud(); renderFab();
+      if (state.panelOpen) renderPanel();
+    },
+
+    onRouteChange() {
+      browseRunId++;
+      activeBrowseStep = null;
+    },
+
+    step() {
+      if (!browseState.running || browseState.paused) return Promise.resolve();
+      if (activeBrowseStep) return activeBrowseStep;
+      const token = browseRunId;
+      const work = (async () => {
+        checkBrowseSafety();
+        if (!browseCanAdvance(token)) return;
+        if (browseState.completedTopics >= browseConfig.targetTopics || browseState.completedPosts >= browseConfig.targetPosts) {
+          this.stop('target_met'); return;
+        }
+        if (isTopicPage()) await this.readCurrentTopic(token);
+        else await this.findAndEnterNextTopic(token);
+      })().catch((err) => {
+        console.error('[有一说一] 浏览失败:', err);
+        if (token === browseRunId) this.suspend('error', '浏览失败，请检查页面后手动恢复');
+      }).finally(() => {
+        if (activeBrowseStep === work) activeBrowseStep = null;
+      });
+      activeBrowseStep = work;
+      return work;
+    },
+
+    async readCurrentTopic(token) {
+      const topicId = parseTopicPath(location.pathname)?.topicId;
+      if (!topicId || !(await waitForContent(8000)) || !browseCanAdvance(token)) return;
+      let articles = $$('article[data-post-id]');
+      if (!articles.length) { this.suspend('content', '没有加载到帖子正文，请手动检查'); return; }
+      if (browseState.currentTopicId !== topicId) {
+        browseState.currentTopicId = topicId; browseState.currentTopicPostsRead = 0;
+        browseState.readPostKeys = [];
+        if (!browseState.history.includes(topicId)) browseState.history.push(topicId);
+        browseState.completedTopics++;
+        persistBrowseState();
+      }
+      while (browseState.currentTopicPostsRead < browseConfig.maxPostsPerTopic) {
+        articles = $$('article[data-post-id]');
+        const article = articles.find((el) => !browseState.readPostKeys.includes(el.getAttribute('data-post-id')));
+        if (!article) break;
+        if (browseState.completedPosts >= browseConfig.targetPosts) { this.stop('target_met'); return; }
+        const key = article.getAttribute('data-post-id');
+        const floor = extractPostFloor(article) || browseState.currentTopicPostsRead + 1;
+        browseState.currentFloor = floor;
+        const targetY = Math.max(0, article.getBoundingClientRect().top + window.scrollY - 130);
+        if (!(await smoothBrowseScrollTo(targetY, 800, token))) return;
+        if (!(await waitBrowseDelay(calculatePostDwell(extractPostText(article)), `正在浏览 #${floor} 楼`, token))) return;
+        if (!browseCanAdvance(token) || !article.isConnected) return;
+        browseState.readPostKeys.push(key); browseState.completedPosts++; browseState.currentTopicPostsRead++;
+        persistBrowseState(); renderHud();
+      }
+      await this.handleTopicFinished(token);
+    },
+
+    async handleTopicFinished(token) {
+      if (!browseCanAdvance(token)) return;
+      if (browseState.completedTopics >= browseConfig.targetTopics || browseState.completedPosts >= browseConfig.targetPosts) {
+        this.stop('target_met'); return;
+      }
+      const rest = browseState.completedTopics % browseConfig.fatigueInterval === 0;
+      browseState.status = rest ? 'resting' : 'cooling';
+      if (!(await waitBrowseDelay(rest ? browseConfig.fatigueRestSeconds : browseConfig.cooldownSeconds, rest ? '阶段休息' : '话题切换等待', token))) return;
+      const next = $$('#suggested-topics a.title, .suggested-topics a.title, .topic-list-item a.title')
+        .map(topicLink).find((item) => item && !browseState.history.includes(item.topicId));
+      if (!browseCanAdvance(token)) return;
+      if (next) next.el.click();
+      else location.href = '/' + browseConfig.sourceList;
+    },
+
+    async findAndEnterNextTopic(token) {
+      if (!(await waitBrowseDelay(1.5, '检查话题列表', token))) return;
+      const chosen = $$('.topic-list-item a.title, a.raw-topic-link').map(topicLink)
+        .find((item) => item && !browseState.history.includes(item.topicId));
+      if (!chosen) { this.stop('no_topics'); return; }
+      if (!(await waitBrowseDelay(1, '准备打开话题', token))) return;
+      if (browseCanAdvance(token)) chosen.el.click();
+    },
+
+    onPageLoad() {
+      if (browseState.running && !browseState.paused) this.step();
+    },
+  };
+
+
+  /* ==========================================================================
+   * 10. 样式 (CSS)
    * ========================================================================== */
 
   const CSS = `
@@ -551,6 +1046,7 @@
     --ldya-loading: #2563eb;
     --ldya-ready: #16a34a;
     --ldya-error: #dc2626;
+    --ldya-warn: #d97706;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
       "Microsoft YaHei", sans-serif;
     position: fixed;
@@ -567,6 +1063,45 @@
     --ldya-shadow: 0 16px 40px rgba(0, 0, 0, .5);
   }
   #${APP}-root * { box-sizing: border-box; }
+
+  /* 悬浮微型状态胶囊 (HUD) */
+  .ldya-hud {
+    position: absolute;
+    right: 0;
+    bottom: 56px;
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 20px;
+    background: var(--ldya-bg);
+    color: var(--ldya-fg);
+    border: 1px solid var(--ldya-line);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, .14);
+    font-size: 12.5px;
+    font-weight: 500;
+    white-space: nowrap;
+    animation: ldya-in .2s ease-out;
+  }
+  .ldya-hud[data-show="1"] { display: flex; }
+  .ldya-hud__dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ldya-ready);
+    animation: ldya-pulse 1.8s ease-out infinite;
+  }
+  .ldya-hud__dot[data-status="paused"] { background: var(--ldya-warn); animation: none; }
+  .ldya-hud__dot[data-status="cooling"] { background: var(--ldya-loading); }
+  .ldya-hud__dot[data-status="resting"] { background: #8b5cf6; }
+  .ldya-hud__title { font-weight: 700; cursor: pointer; color: var(--ldya-fg); }
+  .ldya-hud__title:hover { text-decoration: underline; }
+  .ldya-hud__text { color: var(--ldya-sub); font-size: 12px; }
+  .ldya-hud__btn {
+    border: 0; background: var(--ldya-soft); border-radius: 6px;
+    padding: 2px 7px; font-size: 11.5px; font-weight: 600;
+    color: var(--ldya-sub); cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+  }
+  .ldya-hud__btn:hover { background: var(--ldya-line); color: var(--ldya-fg); }
 
   .ldya-fab {
     position: relative;
@@ -593,6 +1128,7 @@
   .ldya-fab[data-status="loading"] { background: var(--ldya-loading); }
   .ldya-fab[data-status="ready"] { background: var(--ldya-ready); }
   .ldya-fab[data-status="error"] { background: var(--ldya-error); }
+  .ldya-fab[data-status="browsing"] { background: #059669; }
 
   .ldya-fab__icon {
     display: inline-flex;
@@ -635,12 +1171,13 @@
     100% { box-shadow: 0 0 0 0 rgba(250, 204, 21, 0); }
   }
 
+  /* 主面板 */
   .ldya-panel {
     position: absolute;
     right: 0;
     bottom: 58px;
-    width: min(430px, calc(100vw - 32px));
-    max-height: min(72vh, 660px);
+    width: min(440px, calc(100vw - 32px));
+    max-height: min(74vh, 680px);
     display: flex;
     flex-direction: column;
     background: var(--ldya-bg);
@@ -658,12 +1195,16 @@
 
   .ldya-hd {
     display: flex;
+    flex-direction: column;
+    border-bottom: 1px solid var(--ldya-line);
+    background: var(--ldya-soft);
+  }
+  .ldya-hd__top {
+    display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--ldya-line);
-    background: var(--ldya-soft);
+    padding: 10px 14px 6px;
   }
   .ldya-hd__title {
     display: flex;
@@ -671,7 +1212,6 @@
     gap: 8px;
     font-size: 14px;
     font-weight: 700;
-    letter-spacing: .2px;
   }
   .ldya-hd__dot {
     width: 8px; height: 8px; border-radius: 50%;
@@ -692,6 +1232,42 @@
   }
   .ldya-icon-btn:hover { background: rgba(120, 130, 145, .14); color: var(--ldya-fg); }
 
+  /* 导航 Tab */
+  .ldya-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 0 10px 8px;
+  }
+  .ldya-tab-btn {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 30px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ldya-sub);
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .ldya-tab-btn:hover { background: rgba(120, 130, 145, .12); color: var(--ldya-fg); }
+  .ldya-tab-btn.active {
+    background: var(--ldya-bg);
+    color: var(--ldya-fg);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, .08);
+  }
+  .ldya-tab-badge {
+    padding: 1px 5px;
+    border-radius: 6px;
+    font-size: 10px;
+    background: rgba(22, 163, 74, .15);
+    color: var(--ldya-ready);
+  }
+
   .ldya-body {
     padding: 14px;
     overflow-y: auto;
@@ -701,6 +1277,7 @@
   .ldya-body::-webkit-scrollbar { width: 8px; }
   .ldya-body::-webkit-scrollbar-thumb { background: rgba(120, 130, 145, .35); border-radius: 4px; }
 
+  /* 回帖助手主体 */
   .ldya-loading { display: flex; align-items: center; gap: 10px; color: var(--ldya-sub); padding: 8px 0 4px; }
   .ldya-loading__bar {
     flex: 1; height: 3px; border-radius: 2px; overflow: hidden; background: var(--ldya-line); position: relative;
@@ -715,7 +1292,7 @@
   .ldya-reply {
     white-space: pre-wrap;
     word-break: break-word;
-    font-size: 14.5px;
+    font-size: 14px;
     line-height: 1.72;
     color: var(--ldya-fg);
     padding: 12px 13px;
@@ -728,7 +1305,7 @@
 
   .ldya-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
   .ldya-btn {
-    display: inline-flex; align-items: center; gap: 6px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
     height: 34px; padding: 0 14px;
     border-radius: 9px; border: 1px solid var(--ldya-line);
     background: var(--ldya-bg); color: var(--ldya-fg);
@@ -739,6 +1316,8 @@
   .ldya-btn:active { transform: scale(.985); }
   .ldya-btn--primary { background: var(--ldya-ready); border-color: var(--ldya-ready); color: #fff; }
   .ldya-btn--primary:hover { background: #15803d; border-color: #15803d; }
+  .ldya-btn--danger { background: var(--ldya-error); border-color: var(--ldya-error); color: #fff; }
+  .ldya-btn--danger:hover { background: #b91c1c; border-color: #b91c1c; }
   .ldya-btn:disabled { opacity: .5; cursor: not-allowed; }
 
   .ldya-points { margin-top: 14px; display: grid; gap: 8px; }
@@ -749,6 +1328,7 @@
     padding-top: 1px;
   }
   .ldya-point__v { flex: 1; color: var(--ldya-fg); font-size: 12.5px; }
+
   .ldya-tag {
     display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
     border-radius: 10px; font-size: 11px; font-weight: 700;
@@ -778,7 +1358,7 @@
     line-height: 1.6;
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 220px;
+    max-height: 200px;
     overflow: auto;
     color: var(--ldya-fg);
   }
@@ -800,7 +1380,50 @@
 
   .ldya-empty { color: var(--ldya-sub); font-size: 13px; padding: 6px 0; }
 
-  .ldya-settings { margin-top: 12px; }
+  /* 浏览辅助卡片与进度条 */
+  .ldya-card {
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--ldya-soft);
+    border: 1px solid var(--ldya-line);
+    margin-bottom: 12px;
+  }
+  .ldya-card__title { font-size: 13px; font-weight: 700; color: var(--ldya-fg); margin-bottom: 8px; }
+  .ldya-progress-box { margin-top: 8px; }
+  .ldya-progress-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--ldya-sub); margin-bottom: 4px; }
+  .ldya-progress {
+    height: 6px; border-radius: 3px; background: var(--ldya-line); overflow: hidden;
+  }
+  .ldya-progress__fill {
+    height: 100%; border-radius: 3px; background: var(--ldya-ready);
+    transition: width .3s ease;
+  }
+  .ldya-status-banner {
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(37, 99, 235, .08);
+    border: 1px solid rgba(37, 99, 235, .2);
+    color: var(--ldya-loading);
+    font-size: 12.5px;
+    font-weight: 500;
+    margin-bottom: 12px;
+  }
+  .ldya-status-banner[data-state="paused"] {
+    background: rgba(217, 119, 6, .08); border-color: rgba(217, 119, 6, .25); color: var(--ldya-warn);
+  }
+  .ldya-status-banner[data-state="done"] {
+    background: rgba(22, 163, 74, .08); border-color: rgba(22, 163, 74, .25); color: var(--ldya-ready);
+  }
+
+  /* 风控监测卡片 */
+  .ldya-badge-score {
+    display: inline-flex; align-items: center; padding: 2px 8px;
+    border-radius: 12px; font-size: 12px; font-weight: 800;
+  }
+  .ldya-badge-score--a { background: rgba(22, 163, 74, .15); color: #16a34a; }
+  .ldya-badge-score--b { background: rgba(217, 119, 6, .15); color: #d97706; }
+  .ldya-badge-score--warn { background: rgba(220, 38, 38, .15); color: #dc2626; }
+
   .ldya-field { margin-top: 10px; }
   .ldya-field > label {
     display: block; font-size: 12px; font-weight: 600; color: var(--ldya-sub); margin-bottom: 5px;
@@ -839,11 +1462,12 @@
   }
 
   /* ==========================================================================
-   * 9. UI 渲染
+   * 11. UI 渲染与交互
    * ========================================================================== */
 
   let root = null;
   let fab = null;
+  let hud = null;
   let panel = null;
   let toastEl = null;
   let toastTimer = 0;
@@ -878,8 +1502,32 @@
     root.id = APP + '-root';
     root.setAttribute('data-theme', detectTheme());
 
+    // 悬浮微型状态 HUD
+    hud = document.createElement('div');
+    hud.className = 'ldya-hud';
+    hud.innerHTML = `
+      <span class="ldya-hud__dot"></span>
+      <span class="ldya-hud__title" data-act="open-panel">浏览辅助中</span>
+      <span class="ldya-hud__text"></span>
+      <button class="ldya-hud__btn" data-act="hud-pause">暂停</button>
+      <button class="ldya-hud__btn" data-act="hud-stop">结束</button>
+    `;
+
+    hud.addEventListener('click', (e) => {
+      const act = e.target.getAttribute('data-act');
+      if (act === 'open-panel') {
+        state.activeTab = 'browse';
+        togglePanel(true);
+      } else if (act === 'hud-pause') {
+        autoBrowse.pause();
+      } else if (act === 'hud-stop') {
+        autoBrowse.stop('manual');
+      }
+    });
+
     fab = document.createElement('button');
     fab.type = 'button';
+    fab.id = APP + '-fab';
     fab.className = 'ldya-fab';
     fab.innerHTML =
       '<span class="ldya-fab__icon"></span><span class="ldya-fab__text">有一说一</span><span class="ldya-fab__badge"></span>';
@@ -888,10 +1536,12 @@
     toastEl = document.createElement('div');
     toastEl.className = 'ldya-toast';
 
+    root.appendChild(hud);
     root.appendChild(fab);
     root.appendChild(toastEl);
     document.body.appendChild(root);
     renderFab();
+    renderHud();
     return root;
   }
 
@@ -900,7 +1550,7 @@
     toastEl.textContent = message;
     toastEl.setAttribute('data-show', '1');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toastEl.setAttribute('data-show', '0'), 1800);
+    toastTimer = setTimeout(() => toastEl.setAttribute('data-show', '0'), 2000);
   }
 
   const ICONS = {
@@ -911,29 +1561,62 @@
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
     error:
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"/><path d="M12 16.5h.01"/><circle cx="12" cy="12" r="9"/></svg>',
+    browsing:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>',
   };
 
   function fabText() {
+    if (browseState.running) {
+      if (browseState.paused) return '浏览已暂停';
+      return `浏览中 ${browseState.completedTopics}/${browseConfig.targetTopics}`;
+    }
     if (state.status === 'loading') {
       const seconds = Math.max(0, Math.round(state.elapsed / 1000));
       return '生成中 ' + seconds + 's';
     }
     if (state.status === 'ready') return '看回复';
     if (state.status === 'error') return '生成失败';
-    return '有一说一';
+    return isTopicPage() ? '有一说一' : '回帖 / 浏览助手';
   }
 
   function renderFab() {
     if (!fab) return;
-    fab.setAttribute('data-status', state.status);
+    const currentStatus = browseState.running ? 'browsing' : state.status;
+    fab.setAttribute('data-status', currentStatus);
     const icon = fab.querySelector('.ldya-fab__icon');
     const text = fab.querySelector('.ldya-fab__text');
     if (icon) {
       icon.innerHTML =
-        state.status === 'loading' ? '<span class="ldya-fab__spinner"></span>' : ICONS[state.status] || ICONS.idle;
+        state.status === 'loading' && !browseState.running
+          ? '<span class="ldya-fab__spinner"></span>'
+          : ICONS[currentStatus] || ICONS.idle;
     }
     if (text) text.textContent = fabText();
-    fab.title = state.status === 'ready' ? '回复已生成，点击查看' : '有一说一 · 为当前页生成回复';
+    fab.title = browseState.running
+      ? '正在拟人化慢速浏览，点击查看控制面板'
+      : state.status === 'ready'
+      ? '回复已生成，点击查看'
+      : '有一说一 · 回帖与浏览辅助助手';
+  }
+
+  function renderHud() {
+    if (!hud) return;
+    if (!browseState.running) {
+      hud.setAttribute('data-show', '0');
+      return;
+    }
+    hud.setAttribute('data-show', '1');
+    const dot = hud.querySelector('.ldya-hud__dot');
+    const title = hud.querySelector('.ldya-hud__title');
+    const text = hud.querySelector('.ldya-hud__text');
+    const pauseBtn = hud.querySelector('[data-act="hud-pause"]');
+
+    if (dot) dot.setAttribute('data-status', browseState.status);
+    if (title) title.textContent = browseState.paused ? '浏览辅助(暂停)' : '浏览辅助中';
+    if (pauseBtn) pauseBtn.textContent = browseState.paused ? '继续' : '暂停';
+    if (text) {
+      text.textContent = `话题 ${browseState.completedTopics}/${browseConfig.targetTopics} · 帖子 ${browseState.completedPosts}/${browseConfig.targetPosts} · ${browseState.statusText}`;
+    }
   }
 
   function togglePanel(force) {
@@ -943,13 +1626,13 @@
       ensureRoot();
       if (!panel || !root.contains(panel)) {
         panel = document.createElement('div');
+        panel.id = APP + '-panel';
         panel.className = 'ldya-panel';
         root.appendChild(panel);
       }
       panel.style.display = 'flex';
       renderPanel();
-      if (state.status === 'idle' && config.auto === false) {
-        // 手动模式下打开面板时，若已有内容则直接开始生成
+      if (state.status === 'idle' && config.auto === false && isTopicPage()) {
         maybeAutoGenerate({ manual: true });
       }
     } else if (panel) {
@@ -989,16 +1672,35 @@
     }
   }
 
-  function renderPanel() {
+  function renderBrowseStatus() {
     if (!panel) return;
-    const settingsOpen = state.settingsOpen;
-    const detailsState = {
-      input: panel.querySelector('.ldya-more--input')?.open || false,
-      process: panel.querySelector('.ldya-more--process')?.open || false,
-    };
+    const banner = panel.querySelector('.ldya-status-banner');
+    if (banner) {
+      banner.setAttribute('data-state', browseState.status);
+      banner.textContent = browseState.statusText;
+    }
+    const topicFill = panel.querySelector('#ldya-topic-fill');
+    const topicText = panel.querySelector('#ldya-topic-text');
+    if (topicFill && topicText) {
+      const pct = Math.min(100, Math.round((browseState.completedTopics / Math.max(1, browseConfig.targetTopics)) * 100));
+      topicFill.style.width = pct + '%';
+      topicText.textContent = `${browseState.completedTopics} / ${browseConfig.targetTopics} (${pct}%)`;
+    }
+    const postFill = panel.querySelector('#ldya-post-fill');
+    const postText = panel.querySelector('#ldya-post-text');
+    if (postFill && postText) {
+      const pct = Math.min(100, Math.round((browseState.completedPosts / Math.max(1, browseConfig.targetPosts)) * 100));
+      postFill.style.width = pct + '%';
+      postText.textContent = `${browseState.completedPosts} / ${browseConfig.targetPosts} (${pct}%)`;
+    }
+  }
 
+  /* --------------------------------------------------------------------------
+   * 渲染三大 Tab 内容
+   * ------------------------------------------------------------------------ */
+
+  function renderReplyTabHtml() {
     let bodyHtml = '';
-
     if (state.status === 'loading') {
       bodyHtml =
         '<div class="ldya-loading"><span>正在生成回复</span><span class="ldya-loading__bar"></span></div>' +
@@ -1088,7 +1790,7 @@
     } else {
       bodyHtml =
         '<div class="ldya-empty">' +
-        (isTopicPage() ? '还没有生成回复。' : '当前不在帖子详情页，打开任意帖子会自动生成。') +
+        (isTopicPage() ? '还没有生成回复。' : '当前在列表页。进入任意帖子详情页即可自动生成回复。') +
         '</div>' +
         (isTopicPage()
           ? '<div class="ldya-row"><button class="ldya-btn ldya-btn--primary" data-act="regen">生成回复</button></div>'
@@ -1098,7 +1800,7 @@
     // 设置区
     bodyHtml +=
       '<details class="ldya-more ldya-settings"' +
-      (settingsOpen ? ' open' : '') +
+      (state.settingsOpen ? ' open' : '') +
       '><summary>设置</summary>' +
       '<div class="ldya-field"><label>服务地址</label>' +
       '<input class="ldya-input" data-field="apiBase" value="' +
@@ -1127,29 +1829,220 @@
       '<div class="ldya-hint">修改后立即生效，服务地址变更会清空本次结果缓存。</div>' +
       '</details>';
 
-    panel.innerHTML =
-      '<div class="ldya-hd">' +
-      '<div class="ldya-hd__title"><span class="ldya-hd__dot" data-status="' +
-      state.status +
-      '"></span>有一说一' +
-      '<span class="ldya-hd__meta"></span></div>' +
-      '<div class="ldya-hd__btns">' +
-      '<button class="ldya-icon-btn" data-act="refresh" title="重新检测页面">⟳</button>' +
-      '<button class="ldya-icon-btn" data-act="close" title="关闭">✕</button>' +
-      '</div>' +
-      '</div>' +
-      '<div class="ldya-body">' +
-      bodyHtml +
-      '</div>';
+    return bodyHtml;
+  }
 
-    if (detailsState.input) {
-      const el = panel.querySelector('.ldya-more--input');
-      if (el) el.open = true;
+  function renderBrowseTabHtml() {
+    const isRunning = browseState.running;
+    const isPaused = browseState.paused;
+    const topicPct = Math.min(100, Math.round((browseState.completedTopics / Math.max(1, browseConfig.targetTopics)) * 100));
+    const postPct = Math.min(100, Math.round((browseState.completedPosts / Math.max(1, browseConfig.targetPosts)) * 100));
+
+    return `
+      <div class="ldya-status-banner" data-state="${browseState.status}">
+        ${escapeHtml(browseState.statusText)}
+      </div>
+
+      <div class="ldya-card">
+        <div class="ldya-card__title">🧭 任务进度统计</div>
+        <div class="ldya-progress-box">
+          <div class="ldya-progress-label">
+            <span>浏览话题数</span>
+            <span id="ldya-topic-text">${browseState.completedTopics} / ${browseConfig.targetTopics} (${topicPct}%)</span>
+          </div>
+          <div class="ldya-progress"><div class="ldya-progress__fill" id="ldya-topic-fill" style="width:${topicPct}%"></div></div>
+        </div>
+
+        <div class="ldya-progress-box" style="margin-top:10px;">
+          <div class="ldya-progress-label">
+            <span>细读帖子数</span>
+            <span id="ldya-post-text">${browseState.completedPosts} / ${browseConfig.targetPosts} (${postPct}%)</span>
+          </div>
+          <div class="ldya-progress"><div class="ldya-progress__fill" id="ldya-post-fill" style="width:${postPct}%"></div></div>
+        </div>
+
+        <div class="ldya-row" style="margin-top:14px;">
+          ${
+            !isRunning
+              ? '<button class="ldya-btn ldya-btn--primary" data-act="browse-start" style="flex:1;">▶ 开始浏览辅助</button>'
+              : `<button class="ldya-btn" data-act="browse-pause" style="flex:1;">${isPaused ? '▶ 恢复' : '⏸ 暂停'}</button>
+                 <button class="ldya-btn ldya-btn--danger" data-act="browse-stop">⏹ 结束</button>`
+          }
+        </div>
+      </div>
+
+      <details class="ldya-more ldya-browse-settings" open>
+        <summary>⚙️ 浏览速度与操作上限</summary>
+        <div class="ldya-field">
+          <label for="ldya-browse-speed">浏览速度：<output id="ldya-speed-value">${browseConfig.speedPercent}%</output></label>
+          <input id="ldya-browse-speed" class="ldya-input" data-bfield="speedPercent" type="range" min="0" max="100" step="1" value="${browseConfig.speedPercent}" />
+          <div class="ldya-hint">0% 暂停 · 默认 10%（基础等待时间 ×10）· 100% 基础速度；同时控制帖子滚动、停留、话题切换和阶段休息，当前等待即时调整。</div>
+        </div>
+        <div class="ldya-field">
+          <label>目标浏览话题数 (建议 8~25 篇/天)</label>
+          <input class="ldya-input" data-bfield="targetTopics" type="number" min="1" max="100" value="${browseConfig.targetTopics}" />
+        </div>
+        <div class="ldya-field">
+          <label>目标细读帖子数 (建议 30~100 楼/天)</label>
+          <input class="ldya-input" data-bfield="targetPosts" type="number" min="5" max="300" value="${browseConfig.targetPosts}" />
+        </div>
+        <div class="ldya-field">
+          <label>每话题细读楼层上限 (建议 4~8 楼)</label>
+          <input class="ldya-input" data-bfield="maxPostsPerTopic" type="number" min="2" max="25" value="${browseConfig.maxPostsPerTopic}" />
+        </div>
+        <div class="ldya-field">
+          <label>单楼层基础停留时间范围 (100% 速度下，默认 6~15 秒)</label>
+          <div style="display:flex; gap:8px;">
+            <input class="ldya-input" data-bfield="minPostDwellSeconds" type="number" min="6" max="120" value="${browseConfig.minPostDwellSeconds}" placeholder="最少" />
+            <input class="ldya-input" data-bfield="maxPostDwellSeconds" type="number" min="6" max="120" value="${browseConfig.maxPostDwellSeconds}" placeholder="最多" />
+          </div>
+        </div>
+        <div class="ldya-field">
+          <label>换话题基础等待时间 (100% 速度下，至少 18 秒)</label>
+          <input class="ldya-input" data-bfield="cooldownSeconds" type="number" min="18" max="600" value="${browseConfig.cooldownSeconds}" />
+        </div>
+        <div class="ldya-field">
+          <label>话题发现来源</label>
+          <select class="ldya-select" data-bfield="sourceList">
+            <option value="latest" ${browseConfig.sourceList === 'latest' ? 'selected' : ''}>最新话题 (/latest)</option>
+            <option value="unread" ${browseConfig.sourceList === 'unread' ? 'selected' : ''}>未读话题 (/unread)</option>
+            <option value="new" ${browseConfig.sourceList === 'new' ? 'selected' : ''}>新话题 (/new)</option>
+            <option value="top" ${browseConfig.sourceList === 'top' ? 'selected' : ''}>热门话题 (/top)</option>
+          </select>
+        </div>
+        <div class="ldya-row" style="margin-top:10px;">
+          <button class="ldya-btn" data-act="clear-history">清空已读话题历史 (${browseState.history.length})</button>
+        </div>
+        <div class="ldya-hint">以上进度是本地操作计数，不代表网站确认的已读数据。低速也不保证账号安全；不伪造鼠标活动、不绕过验证或站点空闲检测。</div>
+      </details>
+    `;
+  }
+
+  function renderMonitorTabHtml() {
+    const report = riskDetector.getReport();
+    const scoreCls =
+      report.safetyLevel === 'A+' ? 'ldya-badge-score--a' : report.safetyLevel === 'B' ? 'ldya-badge-score--b' : 'ldya-badge-score--warn';
+
+    return `
+      <div class="ldya-card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <span class="ldya-card__title" style="margin:0;">🛡️ 页面信号观察（非账号安全评级）</span>
+          <span class="ldya-badge-score ${scoreCls}">${escapeHtml(report.safetyLevel)}</span>
+        </div>
+        <div style="font-size:12.5px; color:var(--ldya-fg); font-weight:500;">
+          ${escapeHtml(report.safetySummary)}
+        </div>
+      </div>
+
+      <div class="ldya-card">
+        <div class="ldya-card__title">📡 已读信标同步状态 (/topics/timings)</div>
+        <dl class="ldya-kv">
+          <dt>最近同步</dt>
+          <dd>${
+            report.recentTiming
+              ? `${formatClock(report.recentTiming.time)} (${report.recentTiming.duration}ms)`
+              : '尚未触发（进入话题后滚动自动同步）'
+          }</dd>
+          <dt>HTTP 状态</dt>
+          <dd>${
+            report.recentTiming
+              ? report.recentTiming.status === 200
+                ? '<span style="color:#16a34a; font-weight:700;">200 OK（不代表已读计数确认）</span>'
+                : `<span style="color:#dc2626; font-weight:700;">HTTP ${report.recentTiming.status}</span>`
+              : '-'
+          }</dd>
+          <dt>累计信标请求</dt>
+          <dd>成功 ${report.successCount} 次 / 失败 ${report.errorCount} 次</dd>
+        </dl>
+      </div>
+
+      <div class="ldya-card">
+        <div class="ldya-card__title">👁️ 视口与活跃度 (Discourse 依赖检测)</div>
+        <dl class="ldya-kv">
+          <dt>页面可见性</dt>
+          <dd>${
+            report.isHidden
+              ? '<span style="color:#d97706; font-weight:700;">⚠️ 后台/隐藏 (Discourse 暂停计时!)</span>'
+              : '<span style="color:#16a34a; font-weight:700;">🟢 前台可见 (正常计时)</span>'
+          }</dd>
+          <dt>窗口焦点</dt>
+          <dd>${report.hasFocus ? '🟢 拥有窗口焦点' : '⚠️ 失去焦点 (分屏可见仍有效)'}</dd>
+          <dt>验证元素</dt>
+          <dd>${report.challengeDetected ? '检测到验证，请手动处理' : '未发现已识别的验证元素（不代表没有风控）'}</dd>
+        </dl>
+      </div>
+
+      ${
+        report.trackers && report.trackers.length
+          ? `<div class="ldya-card">
+              <div class="ldya-card__title">🔍 页面检测到的遥测 / 埋点 SDK</div>
+              <div style="font-size:12px; color:var(--ldya-sub);">
+                ${report.trackers.map((t) => `• ${escapeHtml(t)}`).join('<br/>')}
+              </div>
+            </div>`
+          : ''
+      }
+
+      ${
+        report.issues.length
+          ? `<div class="ldya-error" style="margin-top:10px;">
+              ${report.issues.map((i) => `⚠️ ${escapeHtml(i)}`).join('\n\n')}
+            </div>`
+          : ''
+      }
+
+      <div class="ldya-card" style="margin-top:12px;">
+        <div class="ldya-card__title">📖 使用边界</div>
+        <div style="font-size:12px; color:var(--ldya-sub); line-height:1.7;">
+          1. 不直接发送或伪造已读计时请求，不模拟鼠标活动。<br/>
+          2. 观察到验证、HTTP 403/429 或页面隐藏时暂停，需手动恢复。<br/>
+          3. 前端检测不是完整风控审计，短时间未出现验证也不代表不会封号；请遵守社区规则。
+        </div>
+      </div>
+    `;
+  }
+
+  function renderPanel() {
+    if (!panel) return;
+
+    let bodyHtml = '';
+    if (state.activeTab === 'reply') {
+      bodyHtml = renderReplyTabHtml();
+    } else if (state.activeTab === 'browse') {
+      bodyHtml = renderBrowseTabHtml();
+    } else if (state.activeTab === 'monitor') {
+      bodyHtml = renderMonitorTabHtml();
     }
-    if (detailsState.process) {
-      const el = panel.querySelector('.ldya-more--process');
-      if (el) el.open = true;
-    }
+
+    panel.innerHTML = `
+      <div class="ldya-hd">
+        <div class="ldya-hd__top">
+          <div class="ldya-hd__title">
+            <span class="ldya-hd__dot" data-status="${state.status}"></span>
+            有一说一 · 助手
+            <span class="ldya-hd__meta"></span>
+          </div>
+          <div class="ldya-hd__btns">
+            <button class="ldya-icon-btn" data-act="refresh" title="重新检测/刷新">⟳</button>
+            <button class="ldya-icon-btn" data-act="close" title="关闭面板">✕</button>
+          </div>
+        </div>
+        <div class="ldya-tabs">
+          <button class="ldya-tab-btn ${state.activeTab === 'reply' ? 'active' : ''}" data-tab="reply">
+            💬 回帖助手
+          </button>
+          <button class="ldya-tab-btn ${state.activeTab === 'browse' ? 'active' : ''}" data-tab="browse">
+            🧭 浏览辅助 <span class="ldya-tab-badge">新</span>
+          </button>
+          <button class="ldya-tab-btn ${state.activeTab === 'monitor' ? 'active' : ''}" data-tab="monitor">
+            🛡️ 风控监测
+          </button>
+        </div>
+      </div>
+      <div class="ldya-body">
+        ${bodyHtml}
+      </div>
+    `;
 
     renderPanelStatus();
     bindPanelEvents();
@@ -1160,6 +2053,15 @@
     panel.__bound = true;
 
     panel.addEventListener('click', (event) => {
+      // Tab 切换
+      const tabBtn = event.target.closest('[data-tab]');
+      if (tabBtn) {
+        state.activeTab = tabBtn.getAttribute('data-tab');
+        store.set(STORE_KEY_ACTIVE_TAB, state.activeTab);
+        renderPanel();
+        return;
+      }
+
       const trigger = event.target.closest('[data-act]');
       if (!trigger) return;
       const act = trigger.getAttribute('data-act');
@@ -1179,7 +2081,8 @@
         return;
       }
       if (act === 'refresh') {
-        runGenerate({ manual: true, force: true });
+        if (state.activeTab === 'reply') runGenerate({ manual: true, force: true });
+        else renderPanel();
         return;
       }
       if (act === 'settings') {
@@ -1187,42 +2090,98 @@
         renderPanel();
         return;
       }
+      if (act === 'browse-start') {
+        autoBrowse.start();
+        return;
+      }
+      if (act === 'browse-pause') {
+        autoBrowse.pause();
+        return;
+      }
+      if (act === 'browse-stop') {
+        autoBrowse.stop('manual');
+        return;
+      }
+      if (act === 'clear-history') {
+        browseState.history = [];
+        persistBrowseState();
+        renderPanel();
+        showToast('已清空浏览历史');
+        return;
+      }
     });
 
-    // 设置区开合状态记忆
-    panel.addEventListener('toggle', (event) => {
-      const target = event.target;
-      if (target && target.classList && target.classList.contains('ldya-settings')) {
-        state.settingsOpen = !!target.open;
-      }
-    }, true);
+    panel.addEventListener(
+      'toggle',
+      (event) => {
+        const target = event.target;
+        if (target && target.classList && target.classList.contains('ldya-settings')) {
+          state.settingsOpen = !!target.open;
+        }
+      },
+      true
+    );
+
+    panel.addEventListener('input', (event) => {
+      if (event.target.getAttribute?.('data-bfield') !== 'speedPercent') return;
+      saveBrowseConfig({ speedPercent: event.target.value });
+      event.target.value = String(browseConfig.speedPercent);
+      const output = panel.querySelector('#ldya-speed-value');
+      if (output) output.textContent = browseConfig.speedPercent + '%';
+      renderBrowseStatus();
+    });
 
     panel.addEventListener('change', (event) => {
+      // 回帖助手配置
       const field = event.target.getAttribute && event.target.getAttribute('data-field');
-      if (!field) return;
-      if (field === 'auto') {
-        saveConfig({ auto: !!event.target.checked });
-        return;
+      if (field) {
+        if (field === 'auto') {
+          saveConfig({ auto: !!event.target.checked });
+          return;
+        }
+        if (field === 'tone') {
+          saveConfig({ tone: event.target.value });
+          if (state.status === 'ready') showToast('语气已切换，重新生成后生效');
+          return;
+        }
+        if (field === 'maxChars') {
+          const value = clamp(Number(event.target.value) || DEFAULT_CONFIG.maxChars, 200, MAX_INPUT_LEN);
+          saveConfig({ maxChars: value });
+          event.target.value = String(value);
+          return;
+        }
+        if (field === 'apiBase') {
+          const value = normalizeApiBase(event.target.value) || DEFAULT_CONFIG.apiBase;
+          saveConfig({ apiBase: value });
+          event.target.value = value;
+          cache.clear();
+          store.set(STORE_KEY_CACHE, {});
+          state.health = null;
+          showToast('服务地址已更新');
+          return;
+        }
       }
-      if (field === 'tone') {
-        saveConfig({ tone: event.target.value });
-        if (state.status === 'ready') showToast('语气已切换，重新生成后生效');
-        return;
-      }
-      if (field === 'maxChars') {
-        const value = clamp(Number(event.target.value) || DEFAULT_CONFIG.maxChars, 200, MAX_INPUT_LEN);
-        saveConfig({ maxChars: value });
-        event.target.value = String(value);
-        return;
-      }
-      if (field === 'apiBase') {
-        const value = normalizeApiBase(event.target.value) || DEFAULT_CONFIG.apiBase;
-        saveConfig({ apiBase: value });
-        event.target.value = value;
-        cache.clear();
-        store.set(STORE_KEY_CACHE, {});
-        state.health = null;
-        showToast('服务地址已更新');
+
+      // 浏览辅助配置
+      const bfield = event.target.getAttribute && event.target.getAttribute('data-bfield');
+      if (bfield) {
+        if (bfield === 'speedPercent') {
+          saveBrowseConfig({ speedPercent: event.target.value });
+          showToast('浏览速度已保存：' + browseConfig.speedPercent + '%');
+          renderPanel();
+          return;
+        }
+        if (bfield === 'sourceList') {
+          saveBrowseConfig({ sourceList: event.target.value });
+          showToast('话题来源已切换');
+          return;
+        }
+        const numVal = parseInt(event.target.value, 10);
+        if (!isNaN(numVal)) {
+          saveBrowseConfig({ [bfield]: numVal });
+          event.target.value = String(browseConfig[bfield]);
+          showToast('配置已更新');
+        }
       }
     });
   }
@@ -1233,15 +2192,11 @@
         GM_setClipboard(text, 'text');
         return true;
       }
-    } catch (_) {
-      /* 继续尝试其他方式 */
-    }
+    } catch (_) {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
-    } catch (_) {
-      /* 继续降级 */
-    }
+    } catch (_) {}
     try {
       const area = document.createElement('textarea');
       area.value = text;
@@ -1267,7 +2222,7 @@
   }
 
   /* ==========================================================================
-   * 10. 生成流程
+   * 12. 回帖生成流程
    * ========================================================================== */
 
   function waitForContent(timeout) {
@@ -1275,7 +2230,6 @@
     const started = Date.now();
     return new Promise((resolve) => {
       const tick = () => {
-        // 标题可能被吸顶栏替换，这里只等楼层渲染出来即可
         const hasPost = $$('article[data-post-id]').length > 0;
         if (hasPost) {
           resolve(true);
@@ -1294,7 +2248,6 @@
   async function runGenerate(options) {
     const opts = options || {};
     if (inflightKey && !opts.force) {
-      // 同一帖子/同一页正在生成时才拦截；换帖可以直接开始新的
       const nextKey = currentRouteSignature();
       if (nextKey === inflightKey) {
         showToast('正在生成中，请稍候');
@@ -1358,7 +2311,6 @@
     const key = buildTopicKey(parsed);
     if (inflightKey && inflightKey === key) return;
 
-    // 冷却：同一帖子短时间内不重复自动请求
     if (!opts.manual && lastAutoTopicId === parsed.topicId && Date.now() - lastAutoAt < AUTO_COOLDOWN) {
       return;
     }
@@ -1383,7 +2335,7 @@
   }
 
   /* ==========================================================================
-   * 11. 路由监听：Discourse 是 SPA，需要拦截 pushState / popstate
+   * 13. 路由监听：Discourse 是 SPA，需要拦截 pushState / popstate
    * ========================================================================== */
 
   let lastHref = location.href;
@@ -1395,11 +2347,6 @@
     return buildTopicKey(parsed);
   }
 
-  /**
-   * 「是否需要重新生成」的判定依据：帖子 id + page 参数。
-   * Discourse 在帖子内跳锚点（点楼层、滚动）只会改末尾楼层号，
-   * 这时不应该重新花几十秒再生成一次。
-   */
   function currentRouteId() {
     if (!isTopicPage()) return 'none';
     const parsed = parseTopicPath(location.pathname);
@@ -1411,28 +2358,33 @@
     if (location.href === lastHref && source !== 'force') return;
     lastHref = location.href;
 
+    showAll();
+    ensureRoot();
+    root.setAttribute('data-theme', detectTheme());
+
     const routeId = currentRouteId();
-    if (routeId === lastRouteId) {
-      // 同一帖子同一页，只是锚点变化，保留已有结果
+    if (routeId === lastRouteId && routeId !== 'none') {
       return;
     }
     lastRouteId = routeId;
+    if (browseState.running) autoBrowse.onRouteChange();
 
     const signature = currentRouteSignature();
 
     if (!isTopicPage()) {
-      hideAll();
       state.status = 'idle';
       state.result = null;
       state.error = '';
       stopElapsedTimer();
-      togglePanel(false);
+      renderFab();
+      renderHud();
+
+      // 如果自动浏览正在运行且在列表页，触发列表页巡视
+      if (browseState.running && !browseState.paused) {
+        setTimeout(() => autoBrowse.step(), 1500);
+      }
       return;
     }
-
-    showAll();
-    ensureRoot();
-    root.setAttribute('data-theme', detectTheme());
 
     const cached = readCache(signature);
     if (cached) {
@@ -1441,11 +2393,15 @@
       state.result = cached.result;
       state.elapsed = 0;
       setStatus('ready', { fromCache: true });
-      return;
+    } else {
+      setStatus('idle', { result: null, error: '', elapsed: 0, input: '' });
+      maybeAutoGenerate();
     }
 
-    setStatus('idle', { result: null, error: '', elapsed: 0, input: '' });
-    maybeAutoGenerate();
+    // 自动浏览任务若在运行中，进入当前话题进行细读
+    if (browseState.running && !browseState.paused) {
+      setTimeout(() => autoBrowse.step(), 1800);
+    }
   }
 
   function installRouter() {
@@ -1463,12 +2419,10 @@
 
     window.addEventListener('popstate', () => setTimeout(() => handleRouteChange('popstate'), 0));
 
-    // 兜底：轮询 URL，覆盖个别不经过 history 的跳转
     setInterval(() => {
       if (location.href !== lastHref) handleRouteChange('poll');
     }, 800);
 
-    // Ember 渲染完成但 URL 未变时（例如从骨架屏变成真实楼层），补一次检测
     const debouncedCheck = debounce(() => {
       if (!isTopicPage()) return;
       if (state.status !== 'idle') return;
@@ -1487,35 +2441,33 @@
   }
 
   /* ==========================================================================
-   * 12. 启动
+   * 14. 启动与全局暴露
    * ========================================================================== */
 
   function boot() {
     loadCache();
+    loadBrowseState();
+    riskDetector.init();
     ensureRoot();
-
-    if (!isTopicPage()) {
-      hideAll();
-      installRouter();
-      return;
-    }
-
     showAll();
     handleRouteChange('force');
     installRouter();
 
-    // 首次进入做一次健康检查，失败时把原因写进面板
-    checkHealth().then((result) => {
-      state.health = result;
-      if (!result.ok && state.status === 'idle') {
-        setStatus('error', {
-          error:
-            '连不上「有一说一」服务（' +
-            normalizeApiBase(config.apiBase) +
-            '）。\n请确认服务已启动：在 reply-assistant 目录运行 python run_one.py。',
-        });
-      }
-    });
+    if (isTopicPage()) {
+      checkHealth().then((result) => {
+        state.health = result;
+        if (!result.ok && state.status === 'idle') {
+          setStatus('error', {
+            error:
+              '连不上「有一说一」服务（' +
+              normalizeApiBase(config.apiBase) +
+              '）。\n请确认服务已启动：在 reply-assistant 目录运行 python run_one.py。',
+          });
+        }
+      });
+    }
+
+    autoBrowse.onPageLoad();
   }
 
   if (document.readyState === 'loading') {
@@ -1524,14 +2476,27 @@
     boot();
   }
 
-  // 便于调试
+  // 调试与外部脚本控制接口
   window.__LDYA__ = {
     version: VERSION,
     state: state,
-    config: () => config,
+    browseState: browseState,
+    browseConfig: () => browseConfig,
+    setBrowseSpeed: (value) => {
+      saveBrowseConfig({ speedPercent: value });
+      if (state.panelOpen) renderPanel();
+      return browseConfig.speedPercent;
+    },
+    riskReport: () => riskDetector.getReport(),
+    startBrowse: () => autoBrowse.start(),
+    pauseBrowse: () => autoBrowse.pause(),
+    stopBrowse: () => autoBrowse.stop('manual'),
     collect: collectTopic,
     buildInput: () => (collectTopic() ? buildInputText(collectTopic()) : ''),
     generate: () => runGenerate({ manual: true, force: true }),
-    open: () => togglePanel(true),
+    open: (tab) => {
+      if (tab) state.activeTab = tab;
+      togglePanel(true);
+    },
   };
 })();
