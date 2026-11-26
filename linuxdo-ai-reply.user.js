@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do 有一说一 · 回帖助手
 // @namespace    https://github.com/koala9527/linuxdo-ai-reply-userscript
-// @version      1.3.1
+// @version      1.3.2
 // @description  本地回帖文案助手与可调速浏览辅助；浏览速度 0–100，默认 10%，遇到限流、验证或页面隐藏即暂停，不保证账号安全或阅读数据增长。
 // @author       Hermes Agent
 // @match        https://linux.do/*
@@ -32,7 +32,7 @@
    * ========================================================================== */
 
   const APP = 'ldya';
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
 
   const STORE_KEY_CONFIG = APP + ':config';
   const STORE_KEY_CACHE = APP + ':cache';
@@ -701,9 +701,20 @@
     },
 
     scanPage() {
-      const hasCfDom = !!document.querySelector(
+      const hasCfDom = Array.from(document.querySelectorAll(
         '.cf-turnstile, #challenge-stage, #cf-wrapper, iframe[src*="challenges.cloudflare.com"]'
-      );
+      )).some((element) => {
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        if (typeof element.checkVisibility === 'function') {
+          return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        for (let node = element; node; node = node.parentElement) {
+          const style = window.getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
+        }
+        return true;
+      });
       this.data.cfDetected = hasCfDom;
 
       const trackers = [];
@@ -928,8 +939,14 @@
       if (!browseState.running) return;
       if (!browseState.paused) { this.suspend('manual', '任务已手动暂停'); return; }
       riskDetector.scanPage();
-      if (browseConfig.speedPercent === 0 || document.hidden || riskDetector.data.cfDetected) {
-        showToast('请先设置非零速度，并确保页面可见且验证已处理'); return;
+      if (document.hidden) {
+        showToast('当前页面已隐藏，请切回页面后恢复'); return;
+      }
+      if (riskDetector.data.cfDetected) {
+        showToast('检测到可见验证，请先手动处理后恢复'); return;
+      }
+      if (browseConfig.speedPercent === 0) {
+        showToast('浏览速度为 0%，请先设置非零速度'); return;
       }
       browseState.paused = false; browseState.pauseReason = '';
       browseState.status = 'reading'; browseState.statusText = '任务已恢复';

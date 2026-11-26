@@ -116,7 +116,7 @@ for (const status of [403, 429]) {
 }
 test('challenge element pauses movement and never solves verification', async () => {
   const h = running(100);
-  h.document.querySelector = () => ({});
+  h.document.querySelectorAll = () => [{ getBoundingClientRect: () => ({ width: 300, height: 65 }), checkVisibility: () => true }];
   const work = h.internals.smoothBrowseScrollTo(500, 800);
   await h.advance(1000); assert.equal(h.window.scrollY, 0);
   assert.equal(h.api.browseState.pauseReason, 'challenge');
@@ -163,14 +163,14 @@ test('100% playback yields to unrelated input callbacks and caps HUD refresh fre
 test('list discovery and navigation both respect 10% speed', async () => {
   const h = running(10);
   let clicks = 0;
-  h.document.querySelectorAll = () => [link('/t/fixture/123', () => clicks++)];
+  h.document.querySelectorAll = (selector) => selector.includes('.cf-turnstile') ? [] : [link('/t/fixture/123', () => clicks++)];
   const work = h.internals.autoBrowse.findAndEnterNextTopic();
   await h.advance(2250); assert.equal(clicks, 0);
   await h.advance(250); await work; assert.equal(clicks, 1);
 });
 test('speed-zero task does not navigate or increment counters', async () => {
   const h = harness(); let clicks = 0;
-  h.document.querySelectorAll = () => [link('/t/fixture/123', () => clicks++)];
+  h.document.querySelectorAll = (selector) => selector.includes('.cf-turnstile') ? [] : [link('/t/fixture/123', () => clicks++)];
   h.api.setBrowseSpeed(0); await h.api.startBrowse(); await h.advance(100000);
   assert.equal(clicks, 0); assert.equal(h.api.browseState.completedTopics, 0);
   assert.equal(h.api.browseState.completedPosts, 0);

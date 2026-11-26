@@ -47,7 +47,7 @@ export function createHarness(scriptPath, saved = {}) {
   if (!source.includes(marker)) throw new Error('Test instrumentation marker missing');
   source = source.replace(marker, `
   renderHud = () => __testRender('hud');
-  renderFab = renderPanel = renderBrowseStatus = showToast = () => {};
+  renderFab = renderPanel = renderBrowseStatus = () => {}; showToast = (message) => (window.__testToasts || []).push(message);
   waitForContent = async () => true;
   window.__LDYA_TEST__ = {
     DEFAULT_BROWSE_CONFIG, browseState, autoBrowse, riskDetector, saveBrowseConfig,
