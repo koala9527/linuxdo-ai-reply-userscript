@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do 有一说一 · 回帖助手
 // @namespace    https://github.com/koala9527/linuxdo-ai-reply-userscript
-// @version      1.3.3
+// @version      1.3.4
 // @description  本地回帖文案助手与可调速浏览辅助；浏览速度 0–100，默认 10%，遇到限流、验证或页面隐藏即暂停，不保证账号安全或阅读数据增长。
 // @author       Hermes Agent
 // @match        https://linux.do/*
@@ -32,7 +32,7 @@
    * ========================================================================== */
 
   const APP = 'ldya';
-  const VERSION = '1.3.3';
+  const VERSION = '1.3.4';
 
   const STORE_KEY_CONFIG = APP + ':config';
   const STORE_KEY_CACHE = APP + ':cache';
@@ -120,9 +120,9 @@
     const result = Object.assign({}, DEFAULT_BROWSE_CONFIG);
     const input = value && typeof value === 'object' ? value : {};
     const ranges = {
-      targetTopics: [1, 100], targetPosts: [1, 300], maxPostsPerTopic: [1, 25],
-      minPostDwellSeconds: [6, 120], maxPostDwellSeconds: [6, 120],
-      charsPerSecond: [10, 100], cooldownSeconds: [18, 600],
+      targetTopics: [1, 99999], targetPosts: [1, 99999], maxPostsPerTopic: [1, 99999],
+      minPostDwellSeconds: [6, 99999], maxPostDwellSeconds: [6, 99999],
+      charsPerSecond: [10, 100], cooldownSeconds: [18, 99999],
       fatigueInterval: [1, 20], fatigueRestSeconds: [90, 1800],
     };
     for (const [key, [min, max]] of Object.entries(ranges)) {
@@ -860,6 +860,21 @@
     return false;
   }
 
+  // Keep long-running tasks idle between checks; speed never shortens this interval.
+  async function waitForFreshTopics(token = browseRunId) {
+    let remaining = 5 * 60 * 1000;
+    let last = performance.now();
+    while (browseState.running && token === browseRunId) {
+      await sleep(1000);
+      checkBrowseSafety();
+      const now = performance.now();
+      if (browseCanAdvance(token)) remaining -= Math.max(0, now - last);
+      last = now;
+      if (remaining <= 0 && browseCanAdvance(token)) return true;
+    }
+    return false;
+  }
+
   function smoothBrowseScrollTo(targetY, durationMs, token = browseRunId) {
     return new Promise((resolve) => {
       const startY = window.scrollY || window.pageYOffset || 0;
@@ -1035,7 +1050,14 @@
       if (!(await waitBrowseDelay(1.5, '检查话题列表', token))) return;
       const chosen = $$('.topic-list-item a.title, a.raw-topic-link').map(topicLink)
         .find((item) => item && !browseState.history.includes(item.topicId));
-      if (!chosen) { this.stop('no_topics'); return; }
+      if (!chosen) {
+        browseState.status = 'cooling';
+        browseState.statusText = '暂无未访问话题，5 分钟后重新检查';
+        renderHud();
+        if (state.panelOpen && state.activeTab === 'browse') renderBrowseStatus();
+        if (await waitForFreshTopics(token) && browseCanAdvance(token)) location.href = '/latest';
+        return;
+      }
       if (!(await waitBrowseDelay(1, '准备打开话题', token))) return;
       if (!browseCanAdvance(token)) return;
       if (browseState.history.includes(chosen.topicId)) return this.findAndEnterNextTopic(token);
@@ -1900,26 +1922,26 @@
         </div>
         <div class="ldya-field">
           <label>目标浏览话题数 (建议 8~25 篇/天)</label>
-          <input class="ldya-input" data-bfield="targetTopics" type="number" min="1" max="100" value="${browseConfig.targetTopics}" />
+          <input class="ldya-input" data-bfield="targetTopics" type="number" min="1" max="99999" value="${browseConfig.targetTopics}" />
         </div>
         <div class="ldya-field">
           <label>目标细读帖子数 (建议 30~100 楼/天)</label>
-          <input class="ldya-input" data-bfield="targetPosts" type="number" min="5" max="300" value="${browseConfig.targetPosts}" />
+          <input class="ldya-input" data-bfield="targetPosts" type="number" min="1" max="99999" value="${browseConfig.targetPosts}" />
         </div>
         <div class="ldya-field">
           <label>每话题细读楼层上限 (建议 4~8 楼)</label>
-          <input class="ldya-input" data-bfield="maxPostsPerTopic" type="number" min="2" max="25" value="${browseConfig.maxPostsPerTopic}" />
+          <input class="ldya-input" data-bfield="maxPostsPerTopic" type="number" min="1" max="99999" value="${browseConfig.maxPostsPerTopic}" />
         </div>
         <div class="ldya-field">
           <label>单楼层基础停留时间范围 (10% 速度下，默认 6~15 秒)</label>
           <div style="display:flex; gap:8px;">
-            <input class="ldya-input" data-bfield="minPostDwellSeconds" type="number" min="6" max="120" value="${browseConfig.minPostDwellSeconds}" placeholder="最少" />
-            <input class="ldya-input" data-bfield="maxPostDwellSeconds" type="number" min="6" max="120" value="${browseConfig.maxPostDwellSeconds}" placeholder="最多" />
+            <input class="ldya-input" data-bfield="minPostDwellSeconds" type="number" min="6" max="99999" value="${browseConfig.minPostDwellSeconds}" placeholder="最少" />
+            <input class="ldya-input" data-bfield="maxPostDwellSeconds" type="number" min="6" max="99999" value="${browseConfig.maxPostDwellSeconds}" placeholder="最多" />
           </div>
         </div>
         <div class="ldya-field">
           <label>换话题基础等待时间 (10% 速度下，至少 18 秒)</label>
-          <input class="ldya-input" data-bfield="cooldownSeconds" type="number" min="18" max="600" value="${browseConfig.cooldownSeconds}" />
+          <input class="ldya-input" data-bfield="cooldownSeconds" type="number" min="18" max="99999" value="${browseConfig.cooldownSeconds}" />
         </div>
         <div class="ldya-row" style="margin-top:10px;">
           <button class="ldya-btn" data-act="clear-history">清空已读话题历史 (${browseState.history.length})</button>

@@ -23,11 +23,12 @@ test('history retains more than 300 visited topics after reload', () => {
  const h=make(); h.api.browseState.history.push(...Array.from({length:350},(_,i)=>String(i+1))); h.internals.persistBrowseState();
  const next=createHarness(src,Object.fromEntries(h.values)); assert.equal(next.api.browseState.history.length,350); assert.equal(next.api.browseState.history[0],'1');
 });
-test('all visited topics ends without clicking or refreshing', async () => {
+test('all visited topics waits without clicking or immediate refresh', async () => {
  const h=running(); h.api.browseState.history.push('111'); let clicks=0;
  h.document.querySelectorAll=s=>s.includes('.topic-list-item') ? [topic('111',()=>clicks++)] : [];
- const work=h.internals.autoBrowse.findAndEnterNextTopic(); await h.advance(150); await work;
- assert.equal(clicks,0); assert.equal(h.api.browseState.running,false); assert.equal(h.location.href,'https://linux.do/latest');
+ const work=h.internals.autoBrowse.findAndEnterNextTopic(); await h.advance(150);
+ assert.equal(clicks,0); assert.equal(h.api.browseState.running,true); assert.equal(h.location.href,'https://linux.do/latest');
+ h.api.stopBrowse(); await h.advance(1000); await work;
 });
 test('a topic recorded during the selection wait is skipped before the click', async () => {
  const h=running(); let clicked='';

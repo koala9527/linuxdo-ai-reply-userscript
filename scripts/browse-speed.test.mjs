@@ -175,10 +175,11 @@ test('speed-zero task does not navigate or increment counters', async () => {
   assert.equal(clicks, 0); assert.equal(h.api.browseState.completedTopics, 0);
   assert.equal(h.api.browseState.completedPosts, 0);
 });
-test('empty list ends instead of reloading indefinitely', async () => {
+test('empty list waits without immediate reload and can be stopped', async () => {
   const h = harness(); h.api.setBrowseSpeed(100);
-  const work = h.api.startBrowse(); await h.advance(1500); await work;
-  assert.equal(h.api.browseState.running, false); assert.equal(h.location.href, 'https://linux.do/latest');
+  const work = h.api.startBrowse(); await h.advance(1500);
+  assert.equal(h.api.browseState.running, true); assert.equal(h.location.href, 'https://linux.do/latest');
+  h.api.stopBrowse(); await h.advance(1000); await work;
 });
 test('only same-origin HTTPS topic links are navigable', () => {
   const h = harness();
