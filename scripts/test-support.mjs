@@ -8,6 +8,7 @@ export function createHarness(scriptPath, saved = {}) {
   const timers = new Map();
   const values = new Map(Object.entries(saved));
   const listeners = new Map();
+  const windowListeners = new Map();
   const renderTimes = [];
   const document = {
     readyState: 'loading', hidden: false, visibilityState: 'visible', title: 'Fixture',
@@ -19,7 +20,7 @@ export function createHarness(scriptPath, saved = {}) {
   const window = {
     scrollY: 0, pageYOffset: 0, innerHeight: 800,
     scrollTo(_x, y) { this.scrollY = y; },
-    addEventListener() {}, dispatchEvent() { throw new Error('Synthetic input is forbidden'); },
+    addEventListener(name, fn) { windowListeners.set(name, fn); }, dispatchEvent() { throw new Error('Synthetic input is forbidden'); },
   };
   const schedule = (fn, ms, repeat) => {
     const id = ++serial;
@@ -66,7 +67,7 @@ ${marker}`);
   vm.runInContext(source, context, { filename: scriptPath });
   const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
   return {
-    api: window.__LDYA__, internals: window.__LDYA_TEST__, document, location, window, values, listeners,
+    api: window.__LDYA__, internals: window.__LDYA_TEST__, document, location, window, values, listeners, windowListeners,
     renderTimes, scheduleInput: (ms, fn) => schedule(fn, ms, false),
     async advance(ms) {
       await flush();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do 有一说一 · 回帖助手
 // @namespace    https://github.com/koala9527/linuxdo-ai-reply-userscript
-// @version      1.3.4
+// @version      1.3.5
 // @description  本地回帖文案助手与可调速浏览辅助；浏览速度 0–100，默认 10%，遇到限流、验证或页面隐藏即暂停，不保证账号安全或阅读数据增长。
 // @author       Hermes Agent
 // @match        https://linux.do/*
@@ -32,7 +32,7 @@
    * ========================================================================== */
 
   const APP = 'ldya';
-  const VERSION = '1.3.4';
+  const VERSION = '1.3.5';
 
   const STORE_KEY_CONFIG = APP + ':config';
   const STORE_KEY_CACHE = APP + ':cache';
@@ -632,6 +632,12 @@
         if (state.panelOpen && state.activeTab === 'monitor') renderPanel();
       });
 
+      // Mark only a deliberate navigation that reaches pagehide while still visible.
+      window.addEventListener('pagehide', () => {
+        if (!homeNavigationPending || !browseCanAdvance()) return;
+        browseState.homeNavigationAt = Date.now();
+        persistBrowseState();
+      });
       this.hookNetwork();
       this.scanPage();
     },
@@ -780,11 +786,12 @@
     running: false, paused: false, pauseReason: '',
     completedTopics: 0, completedPosts: 0, currentTopicPostsRead: 0,
     currentFloor: 1, status: 'idle', statusText: '待命', statusCountdown: 0,
-    startedAt: 0, currentTopicId: null, readPostKeys: [],
+    startedAt: 0, currentTopicId: null, readPostKeys: [], homeNavigationAt: null,
     history: (() => { const value = store.get(STORE_KEY_BROWSE_HISTORY, []); return Array.isArray(value) ? value.filter((id) => typeof id === 'string') : []; })(),
   };
   let browseRunId = 0;
   let activeBrowseStep = null;
+  let homeNavigationPending = false;
 
   function loadBrowseState() {
     // Session storage scopes a running task to its original tab, not every logged-in tab.
@@ -797,10 +804,16 @@
       browseState.currentTopicId = typeof saved.currentTopicId === 'string' ? saved.currentTopicId : null;
       browseState.readPostKeys = Array.isArray(saved.readPostKeys) ? saved.readPostKeys.filter((key) => typeof key === 'string') : [];
       browseState.running = true;
-      browseState.paused = !!saved.paused || browseConfig.speedPercent === 0;
-      browseState.pauseReason = saved.paused ? String(saved.pauseReason || 'manual') : browseConfig.speedPercent === 0 ? 'speed' : '';
+      const age = Date.now() - saved.homeNavigationAt;
+      const resumingNavigation = saved.paused && saved.pauseReason === 'hidden' &&
+        Number.isFinite(saved.homeNavigationAt) && age >= 0 && age <= 15000 &&
+        location.pathname === '/latest' && !document.hidden && browseConfig.speedPercent > 0;
+      if (resumingNavigation) riskDetector.scanPage();
+      browseState.paused = (!!saved.paused && !(resumingNavigation && !riskDetector.data.cfDetected)) || browseConfig.speedPercent === 0;
+      browseState.pauseReason = browseState.paused ? (saved.paused ? String(saved.pauseReason || 'manual') : 'speed') : '';
       browseState.status = browseState.paused ? 'paused' : 'reading';
-      browseState.statusText = browseState.paused ? '浏览任务已暂停，需手动恢复' : '正在恢复本标签页的浏览任务';
+      browseState.statusText = browseState.paused ? (typeof saved.statusText === 'string' ? saved.statusText : '浏览任务已暂停，需手动恢复') : '正在恢复本标签页的浏览任务';
+      if (Number.isFinite(saved.homeNavigationAt)) persistBrowseState();
     } catch (_) {}
   }
 
@@ -808,6 +821,7 @@
     try {
       sessionStorage.setItem(STORE_KEY_BROWSE_STATE, JSON.stringify({
         running: browseState.running, paused: browseState.paused, pauseReason: browseState.pauseReason,
+        statusText: browseState.statusText, homeNavigationAt: browseState.homeNavigationAt,
         completedTopics: browseState.completedTopics, completedPosts: browseState.completedPosts,
         currentTopicPostsRead: browseState.currentTopicPostsRead, currentFloor: browseState.currentFloor,
         currentTopicId: browseState.currentTopicId, readPostKeys: browseState.readPostKeys,
@@ -927,7 +941,7 @@
         running: true, paused: browseConfig.speedPercent === 0,
         pauseReason: browseConfig.speedPercent === 0 ? 'speed' : '',
         startedAt: Date.now(), completedTopics: 0, completedPosts: 0,
-        currentTopicId: null, currentTopicPostsRead: 0, readPostKeys: [],
+        currentTopicId: null, currentTopicPostsRead: 0, readPostKeys: [], homeNavigationAt: null,
         status: browseConfig.speedPercent === 0 ? 'paused' : 'reading',
         statusText: browseConfig.speedPercent === 0 ? '速度为 0%，浏览已暂停' : '浏览辅助已启动',
       });
@@ -939,8 +953,9 @@
     },
 
     suspend(reason, text) {
-      if (!browseState.running || (browseState.paused && browseState.pauseReason === reason)) return;
+      if (!browseState.running || (browseState.paused && (browseState.pauseReason === reason || reason === 'hidden'))) return;
       browseState.paused = true;
+      if (reason !== 'hidden') browseState.homeNavigationAt = null;
       browseState.pauseReason = reason;
       browseState.status = 'paused';
       browseState.statusText = text;
@@ -971,7 +986,8 @@
     stop(reason) {
       browseRunId++;
       activeBrowseStep = null;
-      browseState.running = false; browseState.paused = false; browseState.pauseReason = '';
+      browseState.running = false; browseState.paused = false; browseState.pauseReason = ''; browseState.homeNavigationAt = null;
+      homeNavigationPending = false;
       browseState.status = 'done'; browseState.statusCountdown = 0;
       browseState.statusText = reason === 'target_met' ? '已达到本地浏览上限' : reason === 'no_topics' ? '没有新的可浏览话题，任务已结束' : '任务已停止';
       persistBrowseState(); renderHud(); renderFab();
@@ -1035,6 +1051,11 @@
       await this.handleTopicFinished(token);
     },
 
+    navigateHome() {
+      homeNavigationPending = true;
+      location.href = '/latest';
+    },
+
     async handleTopicFinished(token) {
       if (!browseCanAdvance(token)) return;
       if (browseState.completedTopics >= browseConfig.targetTopics || browseState.completedPosts >= browseConfig.targetPosts) {
@@ -1043,7 +1064,7 @@
       const rest = browseState.completedTopics % browseConfig.fatigueInterval === 0;
       browseState.status = rest ? 'resting' : 'cooling';
       if (!(await waitBrowseDelay(rest ? browseConfig.fatigueRestSeconds : browseConfig.cooldownSeconds, rest ? '阶段休息' : '话题切换等待', token))) return;
-      if (browseCanAdvance(token)) location.href = '/latest';
+      if (browseCanAdvance(token)) this.navigateHome();
     },
 
     async findAndEnterNextTopic(token) {
@@ -1055,7 +1076,7 @@
         browseState.statusText = '暂无未访问话题，5 分钟后重新检查';
         renderHud();
         if (state.panelOpen && state.activeTab === 'browse') renderBrowseStatus();
-        if (await waitForFreshTopics(token) && browseCanAdvance(token)) location.href = '/latest';
+        if (await waitForFreshTopics(token) && browseCanAdvance(token)) this.navigateHome();
         return;
       }
       if (!(await waitBrowseDelay(1, '准备打开话题', token))) return;
