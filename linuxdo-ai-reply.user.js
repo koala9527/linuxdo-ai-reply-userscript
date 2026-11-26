@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do 有一说一 · 回帖助手
 // @namespace    https://github.com/koala9527/linuxdo-ai-reply-userscript
-// @version      1.3.2
+// @version      1.3.3
 // @description  本地回帖文案助手与可调速浏览辅助；浏览速度 0–100，默认 10%，遇到限流、验证或页面隐藏即暂停，不保证账号安全或阅读数据增长。
 // @author       Hermes Agent
 // @match        https://linux.do/*
@@ -32,7 +32,7 @@
    * ========================================================================== */
 
   const APP = 'ldya';
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
 
   const STORE_KEY_CONFIG = APP + ':config';
   const STORE_KEY_CACHE = APP + ':cache';
@@ -61,7 +61,6 @@
     cooldownSeconds: 18,       // 话题切换冷却等待 (秒，建议 15-30)
     fatigueInterval: 5,        // 每浏览 N 个话题后触发一次疲劳休整
     fatigueRestSeconds: 90,    // 疲劳休整等待时间 (秒)
-    sourceList: 'latest',      // 话题来源: latest (最新) | unread (未读) | new (新帖) | top (热门)
     autoResume: true,          // 仅在启动任务的同一标签页内跨页面继续
   };
 
@@ -134,7 +133,6 @@
     }
     result.maxPostDwellSeconds = Math.max(result.minPostDwellSeconds, result.maxPostDwellSeconds);
     result.speedPercent = normalizeBrowseSpeed(input.speedPercent);
-    if (['latest', 'unread', 'new', 'top'].includes(input.sourceList)) result.sourceList = input.sourceList;
     result.autoResume = input.autoResume !== false;
     return result;
   }
@@ -816,7 +814,7 @@
         startedAt: browseState.startedAt,
       }));
     } catch (_) {}
-    store.set(STORE_KEY_BROWSE_HISTORY, browseState.history.slice(-300));
+    store.set(STORE_KEY_BROWSE_HISTORY, browseState.history);
   }
 
   function scaleBrowseDelay(baseSeconds) {
@@ -1030,11 +1028,7 @@
       const rest = browseState.completedTopics % browseConfig.fatigueInterval === 0;
       browseState.status = rest ? 'resting' : 'cooling';
       if (!(await waitBrowseDelay(rest ? browseConfig.fatigueRestSeconds : browseConfig.cooldownSeconds, rest ? '阶段休息' : '话题切换等待', token))) return;
-      const next = $$('#suggested-topics a.title, .suggested-topics a.title, .topic-list-item a.title')
-        .map(topicLink).find((item) => item && !browseState.history.includes(item.topicId));
-      if (!browseCanAdvance(token)) return;
-      if (next) next.el.click();
-      else location.href = '/' + browseConfig.sourceList;
+      if (browseCanAdvance(token)) location.href = '/latest';
     },
 
     async findAndEnterNextTopic(token) {
@@ -1043,7 +1037,11 @@
         .find((item) => item && !browseState.history.includes(item.topicId));
       if (!chosen) { this.stop('no_topics'); return; }
       if (!(await waitBrowseDelay(1, '准备打开话题', token))) return;
-      if (browseCanAdvance(token)) chosen.el.click();
+      if (!browseCanAdvance(token)) return;
+      if (browseState.history.includes(chosen.topicId)) return this.findAndEnterNextTopic(token);
+      browseState.history.push(chosen.topicId);
+      persistBrowseState();
+      chosen.el.click();
     },
 
     onPageLoad() {
@@ -1922,15 +1920,6 @@
         <div class="ldya-field">
           <label>换话题基础等待时间 (10% 速度下，至少 18 秒)</label>
           <input class="ldya-input" data-bfield="cooldownSeconds" type="number" min="18" max="600" value="${browseConfig.cooldownSeconds}" />
-        </div>
-        <div class="ldya-field">
-          <label>话题发现来源</label>
-          <select class="ldya-select" data-bfield="sourceList">
-            <option value="latest" ${browseConfig.sourceList === 'latest' ? 'selected' : ''}>最新话题 (/latest)</option>
-            <option value="unread" ${browseConfig.sourceList === 'unread' ? 'selected' : ''}>未读话题 (/unread)</option>
-            <option value="new" ${browseConfig.sourceList === 'new' ? 'selected' : ''}>新话题 (/new)</option>
-            <option value="top" ${browseConfig.sourceList === 'top' ? 'selected' : ''}>热门话题 (/top)</option>
-          </select>
         </div>
         <div class="ldya-row" style="margin-top:10px;">
           <button class="ldya-btn" data-act="clear-history">清空已读话题历史 (${browseState.history.length})</button>
