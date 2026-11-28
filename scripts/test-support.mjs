@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 // Run the real userscript without booting DOM UI or making network requests.
-export function createHarness(scriptPath, saved = {}) {
+export function createHarness(scriptPath, saved = {}, globals = {}) {
   let now = 0;
   let serial = 0;
   const timers = new Map();
@@ -31,6 +31,7 @@ export function createHarness(scriptPath, saved = {}) {
   math.random = () => 0.5;
   const context = vm.createContext({
     window, document, location, console, Math: math, URL, URLSearchParams,
+    XMLHttpRequest: class extends EventTarget { open() {} send() {} },
     Date: class extends Date { static now() { return now; } },
     performance: { now: () => now },
     __testRender: (name) => renderTimes.push({ name, at: now }),
@@ -42,6 +43,7 @@ export function createHarness(scriptPath, saved = {}) {
     setInterval: (fn, ms) => schedule(fn, ms, true),
     clearTimeout: (id) => timers.delete(id), clearInterval: (id) => timers.delete(id),
     requestAnimationFrame: (fn) => schedule(() => fn(now), 16, false),
+    ...globals,
   });
   let source = fs.readFileSync(scriptPath, 'utf8');
   const marker = '  // 调试与外部脚本控制接口';

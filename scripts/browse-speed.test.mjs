@@ -110,7 +110,7 @@ for (const status of [403, 429]) {
   test(`observed HTTP ${status} suspends browsing; speed change does not resume it`, () => {
     const h = running(100);
     h.internals.riskDetector.recordTiming(status, 20);
-    assert.equal(h.api.browseState.pauseReason, 'limit');
+    assert.equal(h.api.browseState.pauseReason, status === 403 ? 'network' : 'limit');
     h.api.setBrowseSpeed(50); assert.equal(h.api.browseState.paused, true);
   });
 }

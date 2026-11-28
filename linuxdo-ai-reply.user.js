@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux.do 有一说一 · 回帖助手
 // @namespace    https://github.com/koala9527/linuxdo-ai-reply-userscript
-// @version      1.3.5
+// @version      1.3.6
 // @description  本地回帖文案助手与可调速浏览辅助；浏览速度 0–100，默认 10%，遇到限流、验证或页面隐藏即暂停，不保证账号安全或阅读数据增长。
 // @author       Hermes Agent
 // @match        https://linux.do/*
@@ -32,7 +32,7 @@
    * ========================================================================== */
 
   const APP = 'ldya';
-  const VERSION = '1.3.5';
+  const VERSION = '1.3.6';
 
   const STORE_KEY_CONFIG = APP + ':config';
   const STORE_KEY_CACHE = APP + ':cache';
@@ -634,6 +634,11 @@
 
       // Mark only a deliberate navigation that reaches pagehide while still visible.
       window.addEventListener('pagehide', () => {
+        if (networkReloadPending && browseState.pauseReason === 'network' && !document.hidden) {
+          browseState.networkReloadAt = Date.now();
+          persistBrowseState();
+          return;
+        }
         if (!homeNavigationPending || !browseCanAdvance()) return;
         browseState.homeNavigationAt = Date.now();
         persistBrowseState();
@@ -647,17 +652,17 @@
         const origFetch = window.fetch;
         if (typeof origFetch === 'function') {
           window.fetch = function (resource, init) {
-            const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
-            const isTiming = typeof url === 'string' && url.includes('/topics/timings');
+            const url = resource instanceof URL ? resource.href : typeof resource === 'string' ? resource : (resource && resource.url) || '';
+            const kind = riskDetector.requestKind(url);
             const startTime = Date.now();
             const promise = origFetch.apply(this, arguments);
-            if (isTiming) {
+            if (kind) {
               promise
                 .then((res) => {
-                  riskDetector.recordTiming(res.status, Date.now() - startTime);
+                  riskDetector.recordResponse(kind, res.status, Date.now() - startTime, res.headers?.get('cf-mitigated') === 'challenge');
                 })
-                .catch(() => {
-                  riskDetector.recordTiming(0, Date.now() - startTime);
+                .catch((err) => {
+                  if (err?.name !== 'AbortError') riskDetector.recordResponse(kind, 0, Date.now() - startTime);
                 });
             }
             return promise;
@@ -667,15 +672,22 @@
         const origOpen = XMLHttpRequest.prototype.open;
         const origSend = XMLHttpRequest.prototype.send;
         XMLHttpRequest.prototype.open = function (method, url) {
-          this.__ldya_isTiming = typeof url === 'string' && url.includes('/topics/timings');
+          this.__ldya_kind = riskDetector.requestKind(url);
           this.__ldya_startTime = Date.now();
           return origOpen.apply(this, arguments);
         };
         XMLHttpRequest.prototype.send = function () {
-          if (this.__ldya_isTiming) {
+          if (this.__ldya_kind) {
+            const kind = this.__ldya_kind, startTime = this.__ldya_startTime;
+            const loaded = () => riskDetector.recordResponse(kind, this.status,
+              Date.now() - startTime, this.getResponseHeader('cf-mitigated') === 'challenge');
+            const failed = () => riskDetector.recordResponse(kind, 0, Date.now() - startTime);
+            this.addEventListener('load', loaded);
+            for (const event of ['error', 'timeout']) this.addEventListener(event, failed);
             this.addEventListener('loadend', () => {
-              riskDetector.recordTiming(this.status, Date.now() - (this.__ldya_startTime || Date.now()));
-            });
+              this.removeEventListener('load', loaded);
+              for (const event of ['error', 'timeout']) this.removeEventListener(event, failed);
+            }, { once: true });
           }
           return origSend.apply(this, arguments);
         };
@@ -684,7 +696,22 @@
       }
     },
 
-    recordTiming(status, duration) {
+    requestKind(value) {
+      try {
+        const url = new URL(value, location.href);
+        if (url.origin !== location.origin) return '';
+        if (/^\/topics\/timings\/?$/.test(url.pathname)) return 'timing';
+        if (/^\/(?:latest|new|unread|top)\.json$/.test(url.pathname) || /^\/t\/.+\.json$/.test(url.pathname)) return 'content';
+      } catch (_) {}
+      return '';
+    },
+
+    recordResponse(kind, status, duration, challenge = false) {
+      if (kind === 'timing') this.recordTiming(status, duration, challenge);
+      else autoBrowse.handleNetworkStatus(status, challenge);
+    },
+
+    recordTiming(status, duration, challenge = false) {
       const entry = {
         time: Date.now(),
         status: status,
@@ -698,9 +725,7 @@
       } else {
         this.data.timingsErrorCount++;
       }
-      if (status === 429 || status === 403) {
-        autoBrowse.suspend('limit', `收到 HTTP ${status}，浏览已暂停；请检查网站提示后手动恢复`);
-      }
+      autoBrowse.handleNetworkStatus(status, challenge);
       if (state.panelOpen && state.activeTab === 'monitor') renderPanel();
     },
 
@@ -787,11 +812,15 @@
     completedTopics: 0, completedPosts: 0, currentTopicPostsRead: 0,
     currentFloor: 1, status: 'idle', statusText: '待命', statusCountdown: 0,
     startedAt: 0, currentTopicId: null, readPostKeys: [], homeNavigationAt: null,
+    networkRetries: 0, networkReloadAt: null, networkReloadPath: '',
     history: (() => { const value = store.get(STORE_KEY_BROWSE_HISTORY, []); return Array.isArray(value) ? value.filter((id) => typeof id === 'string') : []; })(),
   };
   let browseRunId = 0;
   let activeBrowseStep = null;
   let homeNavigationPending = false;
+  let networkRetryTimer = null;
+  let networkReloadPending = false;
+  const NETWORK_RETRY_DELAYS = [15000, 45000];
 
   function loadBrowseState() {
     // Session storage scopes a running task to its original tab, not every logged-in tab.
@@ -804,16 +833,23 @@
       browseState.currentTopicId = typeof saved.currentTopicId === 'string' ? saved.currentTopicId : null;
       browseState.readPostKeys = Array.isArray(saved.readPostKeys) ? saved.readPostKeys.filter((key) => typeof key === 'string') : [];
       browseState.running = true;
+      browseState.networkRetries = Number.isInteger(saved.networkRetries) && saved.networkRetries >= 0
+        ? Math.min(saved.networkRetries, NETWORK_RETRY_DELAYS.length) : 0;
       const age = Date.now() - saved.homeNavigationAt;
       const resumingNavigation = saved.paused && saved.pauseReason === 'hidden' &&
         Number.isFinite(saved.homeNavigationAt) && age >= 0 && age <= 15000 &&
         location.pathname === '/latest' && !document.hidden && browseConfig.speedPercent > 0;
-      if (resumingNavigation) riskDetector.scanPage();
-      browseState.paused = (!!saved.paused && !(resumingNavigation && !riskDetector.data.cfDetected)) || browseConfig.speedPercent === 0;
+      const retryAge = Date.now() - saved.networkReloadAt;
+      const resumingRetry = saved.paused && saved.pauseReason === 'network' &&
+        Number.isFinite(saved.networkReloadAt) && retryAge >= 0 && retryAge <= 15000 &&
+        saved.networkReloadPath === location.pathname + location.search && !document.hidden && browseConfig.speedPercent > 0;
+      if (resumingNavigation || resumingRetry) riskDetector.scanPage();
+      browseState.paused = (!!saved.paused && !((resumingNavigation || resumingRetry) && !riskDetector.data.cfDetected)) || browseConfig.speedPercent === 0;
       browseState.pauseReason = browseState.paused ? (saved.paused ? String(saved.pauseReason || 'manual') : 'speed') : '';
       browseState.status = browseState.paused ? 'paused' : 'reading';
       browseState.statusText = browseState.paused ? (typeof saved.statusText === 'string' ? saved.statusText : '浏览任务已暂停，需手动恢复') : '正在恢复本标签页的浏览任务';
-      if (Number.isFinite(saved.homeNavigationAt)) persistBrowseState();
+      if (browseState.paused && saved.pauseReason === 'network') browseState.statusText = '网络恢复中断，请检查页面后手动恢复';
+      if (Number.isFinite(saved.homeNavigationAt) || Number.isFinite(saved.networkReloadAt)) persistBrowseState();
     } catch (_) {}
   }
 
@@ -822,6 +858,7 @@
       sessionStorage.setItem(STORE_KEY_BROWSE_STATE, JSON.stringify({
         running: browseState.running, paused: browseState.paused, pauseReason: browseState.pauseReason,
         statusText: browseState.statusText, homeNavigationAt: browseState.homeNavigationAt,
+        networkRetries: browseState.networkRetries, networkReloadAt: browseState.networkReloadAt, networkReloadPath: browseState.networkReloadPath,
         completedTopics: browseState.completedTopics, completedPosts: browseState.completedPosts,
         currentTopicPostsRead: browseState.currentTopicPostsRead, currentFloor: browseState.currentFloor,
         currentTopicId: browseState.currentTopicId, readPostKeys: browseState.readPostKeys,
@@ -884,7 +921,7 @@
       const now = performance.now();
       if (browseCanAdvance(token)) remaining -= Math.max(0, now - last);
       last = now;
-      if (remaining <= 0 && browseCanAdvance(token)) return true;
+      if (browseCanAdvance(token) && (remaining <= 0 || nextUnvisitedTopic())) return true;
     }
     return false;
   }
@@ -932,6 +969,34 @@
     } catch (_) { return null; }
   }
 
+  function listedTopics() {
+    return $$('.topic-list-item a.title, a.raw-topic-link').map(topicLink).filter(Boolean);
+  }
+
+  function nextUnvisitedTopic() {
+    const visited = new Set(browseState.history);
+    return listedTopics().find((item) => !visited.has(item.topicId));
+  }
+
+  // Let Discourse's own infinite-scroll loader request the next batch. Never synthesize API reads.
+  async function loadMoreListedTopics(token) {
+    const list = document.querySelector('.topic-list');
+    if (!list) return false;
+    const before = new Set(listedTopics().map((item) => item.topicId));
+    browseState.statusText = '正在加载更多未访问话题';
+    const bottom = list.getBoundingClientRect().bottom + window.scrollY;
+    if (!(await smoothBrowseScrollTo(Math.max(0, bottom - window.innerHeight + 200), 800, token))) return false;
+    let waited = 0;
+    while (browseState.running && token === browseRunId && waited < 10000) {
+      await sleep(500);
+      checkBrowseSafety();
+      if (!browseCanAdvance(token)) continue;
+      waited += 500;
+      if (waited >= 2000 && listedTopics().some((item) => !before.has(item.topicId))) return true;
+    }
+    return false;
+  }
+
   const autoBrowse = {
     start() {
       if (browseState.running) return this.step();
@@ -942,6 +1007,7 @@
         pauseReason: browseConfig.speedPercent === 0 ? 'speed' : '',
         startedAt: Date.now(), completedTopics: 0, completedPosts: 0,
         currentTopicId: null, currentTopicPostsRead: 0, readPostKeys: [], homeNavigationAt: null,
+        networkRetries: 0, networkReloadAt: null, networkReloadPath: '',
         status: browseConfig.speedPercent === 0 ? 'paused' : 'reading',
         statusText: browseConfig.speedPercent === 0 ? '速度为 0%，浏览已暂停' : '浏览辅助已启动',
       });
@@ -953,7 +1019,9 @@
     },
 
     suspend(reason, text) {
-      if (!browseState.running || (browseState.paused && (browseState.pauseReason === reason || reason === 'hidden'))) return;
+      if (reason === 'hidden' && networkReloadPending && Number.isFinite(browseState.networkReloadAt)) return;
+      if (!browseState.running || (browseState.paused && (browseState.pauseReason === reason || (reason === 'hidden' && browseState.pauseReason !== 'network')))) return;
+      if (reason !== 'network') this.cancelNetworkRetry();
       browseState.paused = true;
       if (reason !== 'hidden') browseState.homeNavigationAt = null;
       browseState.pauseReason = reason;
@@ -961,6 +1029,45 @@
       browseState.statusText = text;
       persistBrowseState(); renderHud(); renderFab();
       if (state.panelOpen) renderPanel();
+    },
+
+    cancelNetworkRetry() {
+      clearTimeout(networkRetryTimer);
+      networkRetryTimer = null; networkReloadPending = false;
+      browseState.networkReloadAt = null; browseState.networkReloadPath = '';
+    },
+
+    handleNetworkStatus(status, challenge = false) {
+      if (!browseState.running) return;
+      if (challenge) { this.suspend('challenge', '服务器返回验证页面，请手动处理后恢复'); return; }
+      if (status === 429 || status === 401) {
+        this.suspend('limit', `收到 HTTP ${status}，请检查网站提示后手动恢复`); return;
+      }
+      if (![0, 403, 408, 500, 502, 503, 504].includes(status)) return;
+      if (browseState.paused) return;
+      checkBrowseSafety();
+      if (!browseCanAdvance()) return;
+      const delay = NETWORK_RETRY_DELAYS[browseState.networkRetries];
+      if (!delay) { this.suspend('limit', '刷新重试次数已用完，请检查网络和网站提示后手动恢复'); return; }
+      browseState.networkRetries++;
+      this.suspend('network', `${status ? 'HTTP ' + status : '网络请求失败'}，等待刷新重试 ${browseState.networkRetries}/${NETWORK_RETRY_DELAYS.length}`);
+      const deadline = Date.now() + delay;
+      const tick = () => {
+        if (!browseState.running || browseState.pauseReason !== 'network') return;
+        checkBrowseSafety();
+        if (browseConfig.speedPercent === 0) this.suspend('speed', '速度为 0%，已取消刷新重试');
+        if (browseState.pauseReason !== 'network') return;
+        browseState.statusCountdown = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        renderHud();
+        if (state.panelOpen && state.activeTab === 'browse') renderBrowseStatus();
+        if (Date.now() < deadline) { networkRetryTimer = setTimeout(tick, 1000); return; }
+        networkRetryTimer = null;
+        networkReloadPending = true;
+        browseState.networkReloadPath = location.pathname + location.search;
+        persistBrowseState();
+        location.reload();
+      };
+      tick();
     },
 
     pause() {
@@ -976,6 +1083,7 @@
       if (browseConfig.speedPercent === 0) {
         showToast('浏览速度为 0%，请先设置非零速度'); return;
       }
+      this.cancelNetworkRetry();
       browseState.paused = false; browseState.pauseReason = '';
       browseState.status = 'reading'; browseState.statusText = '任务已恢复';
       persistBrowseState(); renderHud(); renderFab();
@@ -984,6 +1092,7 @@
     },
 
     stop(reason) {
+      this.cancelNetworkRetry();
       browseRunId++;
       activeBrowseStep = null;
       browseState.running = false; browseState.paused = false; browseState.pauseReason = ''; browseState.homeNavigationAt = null;
@@ -995,6 +1104,7 @@
     },
 
     onRouteChange() {
+      this.cancelNetworkRetry();
       browseRunId++;
       activeBrowseStep = null;
     },
@@ -1067,27 +1177,36 @@
       if (browseCanAdvance(token)) this.navigateHome();
     },
 
-    async findAndEnterNextTopic(token) {
-      if (!(await waitBrowseDelay(1.5, '检查话题列表', token))) return;
-      const chosen = $$('.topic-list-item a.title, a.raw-topic-link').map(topicLink)
-        .find((item) => item && !browseState.history.includes(item.topicId));
-      if (!chosen) {
-        browseState.status = 'cooling';
-        browseState.statusText = '暂无未访问话题，5 分钟后重新检查';
-        renderHud();
-        if (state.panelOpen && state.activeTab === 'browse') renderBrowseStatus();
-        if (await waitForFreshTopics(token) && browseCanAdvance(token)) this.navigateHome();
+    async findAndEnterNextTopic(token = browseRunId) {
+      while (browseState.running && token === browseRunId) {
+        if (!(await waitBrowseDelay(1.5, '检查话题列表', token))) return;
+        const chosen = nextUnvisitedTopic();
+        if (!chosen) {
+          if (await loadMoreListedTopics(token)) continue;
+          if (!browseCanAdvance(token)) return;
+          browseState.status = 'cooling';
+          browseState.statusText = '暂无未访问话题，5 分钟后重新检查';
+          renderHud();
+          if (state.panelOpen && state.activeTab === 'browse') renderBrowseStatus();
+          if (await waitForFreshTopics(token) && browseCanAdvance(token)) {
+            if (nextUnvisitedTopic()) continue;
+            this.navigateHome();
+          }
+          return;
+        }
+        if (!(await waitBrowseDelay(1, '准备打开话题', token))) return;
+        if (!browseCanAdvance(token)) return;
+        if (browseState.history.includes(chosen.topicId) || chosen.el.isConnected === false) continue;
+        browseState.history.push(chosen.topicId);
+        persistBrowseState();
+        chosen.el.click();
         return;
       }
-      if (!(await waitBrowseDelay(1, '准备打开话题', token))) return;
-      if (!browseCanAdvance(token)) return;
-      if (browseState.history.includes(chosen.topicId)) return this.findAndEnterNextTopic(token);
-      browseState.history.push(chosen.topicId);
-      persistBrowseState();
-      chosen.el.click();
     },
 
     onPageLoad() {
+      const status = performance.getEntriesByType?.('navigation')[0]?.responseStatus;
+      if (status >= 400) this.handleNetworkStatus(status);
       if (browseState.running && !browseState.paused) this.step();
     },
   };
